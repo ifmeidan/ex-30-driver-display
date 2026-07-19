@@ -1,0 +1,21 @@
+# @PROJECT_DIR@ is filled in by scripts/setup_lite.sh at install time.
+[Unit]
+Description=EX30 Driver Display
+After=seatd.service
+
+[Service]
+Type=simple
+User=@PI_USER@
+Group=@PI_USER@
+Environment=WLR_LIBINPUT_NO_DEVICES=1
+# cage refuses to start without this. The directory is created by logind, and
+# only persists with no one logged in if lingering is enabled for the user —
+# scripts/setup_lite.sh runs `loginctl enable-linger` for exactly that reason.
+Environment=XDG_RUNTIME_DIR=/run/user/@PI_UID@
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=/usr/bin/cage -- @PROJECT_DIR@/scripts/launch.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

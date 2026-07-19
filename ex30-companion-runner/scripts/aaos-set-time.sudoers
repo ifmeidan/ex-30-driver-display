@@ -1,0 +1,5 @@
+# Allow the driver-display service user to set the system clock without a
+# password, but ONLY through the validating helper at /usr/local/sbin/aaos-set-time.
+# Installed at /etc/sudoers.d/aaos-set-time (mode 440, root:root) — see
+# scripts/install_clock_sync.sh, which replaces @PI_USER@ with the installing user.
+@PI_USER@ ALL=(root) NOPASSWD: /usr/local/sbin/aaos-set-time *

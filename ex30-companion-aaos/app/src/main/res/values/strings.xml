@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">EX30 Companion</string>
+    <string name="rationale_title">Vehicle telemetry — read only</string>
+    <string name="rationale_body">This app reads vehicle telemetry such as speed, gear, EV battery state, pedal position, and turn signals.\n\nIt never writes to any vehicle property.\n\nData leaves the car only over a local network connection to your Raspberry Pi driver display.</string>
+    <string name="rationale_grant">Grant access</string>
+    <string name="rationale_skip">Not now</string>
+    <string name="parked_only_message">Live property data is hidden while the vehicle is in motion.\n\nShift to Park (P) or apply the parking brake to view.</string>
+    <string name="bridge_channel_name">Pi bridge</string>
+    <string name="bridge_channel_desc">Notifies you that the EX30 Companion is forwarding vehicle telemetry to your Raspberry Pi driver display.</string>
+    <string name="bridge_notification_title">EX30 Companion</string>
+    <string name="bridge_notification_text">Forwarding vehicle telemetry to Pi driver display</string>
+</resources>

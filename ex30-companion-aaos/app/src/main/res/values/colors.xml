@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="staleness_fresh">#2E7D32</color>   <!-- green:  < 1s -->
+    <color name="staleness_warm">#F9A825</color>    <!-- amber:  < 5s -->
+    <color name="staleness_stale">#C62828</color>   <!-- red:    >= 5s -->
+    <color name="staleness_error">#6A1B9A</color>   <!-- purple: error / not supported / denied -->
+    <color name="staleness_never">#616161</color>   <!-- grey:   never observed -->
+
+    <!-- Launcher icon -->
+    <color name="ic_launcher_background">#0F2540</color>
+</resources>

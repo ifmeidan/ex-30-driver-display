@@ -1,0 +1,31 @@
+# JetBrains
+.idea/
+*.iml
+
+# Android / Gradle
+.gradle/
+build/
+local.properties
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Kotlin
+.kotlin/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Bench / soak runtime output
+logs/
+
+# Release signing — never commit the upload keystore or its passwords.
+keystore.properties
+*.keystore
+*.jks

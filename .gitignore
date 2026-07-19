@@ -1,0 +1,33 @@
+# ── Secrets & signing — NEVER commit ────────────────────────────────
+# These live in the working tree so the app can be built and signed from
+# this repository, but they must stay local. Duplicated here (they are
+# also in ex30-companion-aaos/.gitignore) so deleting one ignore file
+# can't leak the upload key.
+keystore.properties
+upload-keystore.jks
+*.jks
+*.keystore
+*.p12
+*.pepk
+local.properties
+
+# Maintainer-only working notes (Play listing copy, signing runbook).
+# Local reference for building/uploading releases — not public content.
+_local/
+
+# ── Build outputs (release artifacts are uploaded, never committed) ──
+*.aab
+*.apk
+*.ap_
+*.dex
+build/
+.gradle/
+.kotlin/
+captures/
+
+# ── Editors / OS ────────────────────────────────────────────────────
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+.claude/

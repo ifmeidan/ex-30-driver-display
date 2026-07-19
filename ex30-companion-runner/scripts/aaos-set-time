@@ -1,0 +1,30 @@
+#!/bin/bash
+# Privileged helper: set the system clock from an epoch-seconds argument.
+#
+# Installed at /usr/local/sbin/aaos-set-time (root:root 755). The companion
+# sudoers drop-in (etc/sudoers.d/aaos-set-time) lets the service user invoke this via
+# `sudo -n` without a password, but ONLY this exact path. Validation here is
+# the security boundary — the sudoers rule allows any argument, so this script
+# must reject anything that isn't a sane epoch-seconds integer.
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "usage: $0 <epoch_seconds>" >&2
+    exit 2
+fi
+
+arg=$1
+if ! [[ $arg =~ ^[0-9]+$ ]]; then
+    echo "invalid: not numeric" >&2
+    exit 3
+fi
+
+# Sanity range: ~2023-11-15 .. ~2096-10. Rejects 1970 (fake-hwclock zero) and
+# anything implausibly far in the future.
+if (( arg < 1700000000 || arg > 4000000000 )); then
+    echo "invalid: out of range" >&2
+    exit 4
+fi
+
+exec /usr/bin/date -s "@$arg" >/dev/null

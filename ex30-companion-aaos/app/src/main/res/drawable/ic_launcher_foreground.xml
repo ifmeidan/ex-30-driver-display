@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Adaptive-icon foreground. The 108dp canvas has a 72dp safe zone in the
+    middle that survives every launcher mask (circle, squircle, square). All
+    drawing is done inside that 72dp zone; the outer 18dp on each side is the
+    parallax / mask area and stays empty.
+
+    Design: a stylized speedometer arc with "EX30" centered. Strokes scale
+    with vector resolution so it stays crisp at every density (mdpi..xxxhdpi)
+    and at the 512x512 export Play uses for the store listing.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Speedometer arc, ~225° opening downward, centered on (54,54). -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M 31,76 A 28,28 0 1 1 77,76" />
+
+    <!-- Tick marks every 45° along the arc. -->
+    <path
+        android:strokeColor="#7FB3FF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M 28,68 L 24,70 M 32,52 L 27,51 M 42,38 L 39,34 M 54,32 L 54,27 M 66,38 L 69,34 M 76,52 L 81,51 M 80,68 L 84,70" />
+
+    <!-- Needle pointing at "60" position (~30° above horizontal right). -->
+    <path
+        android:strokeColor="#FFC857"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M 54,54 L 72,42" />
+    <!-- Hub. -->
+    <path
+        android:fillColor="#FFC857"
+        android:pathData="M 54,54 m -3,0 a 3,3 0 1,0 6,0 a 3,3 0 1,0 -6,0" />
+
+    <!-- "EX30" wordmark below the arc. Plotted as filled rectangles to keep
+         the icon font-free; chunky strokes read well at small sizes. -->
+    <group>
+        <!-- E -->
+        <path android:fillColor="#FFFFFF" android:pathData="M 33,80 h 8 v 2 h -6 v 3 h 5 v 2 h -5 v 3 h 6 v 2 h -8 z" />
+        <!-- X -->
+        <path android:fillColor="#FFFFFF" android:pathData="M 43,80 h 2.2 l 2.3,3.5 l 2.3,-3.5 h 2.2 l -3.4,5 l 3.6,5 h -2.3 l -2.4,-3.6 l -2.4,3.6 h -2.3 l 3.6,-5 z" />
+        <!-- 3 -->
+        <path android:fillColor="#FFC857" android:pathData="M 54,80 h 7 v 2 h -5 v 2 h 4 v 2 h -4 v 2 h 5 v 2 h -7 z" />
+        <!-- 0 -->
+        <path android:fillColor="#FFC857" android:pathData="M 64,80 h 7 v 10 h -7 z M 66,82 v 6 h 3 v -6 z" android:fillType="evenOdd" />
+    </group>
+</vector>

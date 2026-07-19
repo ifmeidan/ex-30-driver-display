@@ -1,0 +1,9 @@
+# Core
+pyserial>=3.5
+
+# UI framework (PyQt5 is not available on aarch64 + Python 3.13, so PySide6)
+PySide6>=6.7
+
+# Testing
+pytest>=8.0
+pytest-qt>=4.4
