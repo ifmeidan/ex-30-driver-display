@@ -22,12 +22,12 @@ android {
         applicationId = "com.ex30companion"
         minSdk = 32
         // Bumped to 34 for Play Store acceptance (lintVitalRelease enforces
-        // ExpiredTargetSdkVersion). Triggers the API-34 foreground-service-type
+        // ExpiredTargetSdkVersion). Triggers the API-35 foreground-service-type
         // requirement, satisfied via FOREGROUND_SERVICE_CONNECTED_DEVICE +
         // android:foregroundServiceType="connectedDevice" on BridgeService.
-        targetSdk = 34
-        versionCode = 17
-        versionName = "1.0.4"
+        targetSdk = 35
+        versionCode = 19
+        versionName = "1.0.5"
     }
 
     signingConfigs {
