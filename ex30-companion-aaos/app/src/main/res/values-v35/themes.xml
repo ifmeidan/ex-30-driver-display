@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Temporary diagnostic for the missing connection row on Android 15.
+         Replace with explicit inset handling for the long-term fix. -->
+    <style name="Theme.Ex30Companion.Main" parent="Theme.AppCompat.DayNight">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>
