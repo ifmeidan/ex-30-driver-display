@@ -39,6 +39,7 @@ class BridgeClient(
     private val port: Int = 7878,
     private val appVersion: String = BuildConfig.VERSION_NAME,
     private val parkedState: kotlinx.coroutines.flow.StateFlow<ParkedModeMonitor.State>? = null,
+    private val navEnabledProvider: () -> Boolean = { false },
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -85,6 +86,7 @@ class BridgeClient(
         started = true
         registerWifiCallback()
         scope.launch { observeRepository() }
+        scope.launch { observeNavigation() }
         scope.launch { runCoalescer() }
         scope.launch { runHeartbeat() }
         scope.launch { runConnectionLoop() }
@@ -190,6 +192,35 @@ class BridgeClient(
                 }
             }
         }
+    }
+
+    /**
+     * Emits standalone `{"type": "nav", ...}` frames, separate from vehicle
+     * `state` telemetry and gated by the in-app opt-in toggle.
+     */
+    private suspend fun observeNavigation() {
+        var lastSent = NavState()
+        NavStateRepository.state.collect { raw ->
+            val effective = if (navEnabledProvider()) raw else NavState()
+            if (effective == lastSent) return@collect
+            lastSent = effective
+            enqueue(buildNavFrame(effective).toString())
+        }
+    }
+
+    private fun buildNavFrame(nav: NavState): JSONObject = JSONObject().apply {
+        put("type", "nav")
+        put("ts", System.currentTimeMillis())
+        put("src", "aaos")
+        put(
+            "nav",
+            JSONObject().apply {
+                put("active", nav.active)
+                put("maneuver", if (nav.active) nav.maneuver else "none")
+                put("distance", if (nav.active) nav.distance else "")
+                put("exit", if (nav.active) nav.exitNumber else 0)
+            },
+        )
     }
 
     // --- Coalescer ----------------------------------------------------------
@@ -356,6 +387,12 @@ class BridgeClient(
                 val raw = sample.value ?: continue
                 val wire = WireFieldMapper.map(propertyId, raw) ?: continue
                 pendingChanges[wire.field] = wire.value
+            }
+        }
+        if (navEnabledProvider()) {
+            val nav = NavStateRepository.state.value
+            if (nav.active) {
+                enqueue(buildNavFrame(nav).toString())
             }
         }
     }

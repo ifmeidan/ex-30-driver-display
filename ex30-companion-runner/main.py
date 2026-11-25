@@ -48,6 +48,8 @@ def main() -> int:
                         help="Disable the per-drive CSV logger (default on)")
     parser.add_argument("--no-standby", action="store_true",
                         help="Disable parking standby (poll forever)")
+    parser.add_argument("--aaos-nav", action="store_true",
+                        help="Enable experimental AAOS maneuver + distance receiver (opt-in)")
     args = parser.parse_args()
 
     settings = Settings()
@@ -79,6 +81,8 @@ def main() -> int:
 
     if args.no_standby:
         settings.standby.enabled = False
+    if args.aaos_nav:
+        settings.aaos_nav_enabled = True
 
     supervisor = ObdSupervisor(
         connection, protocol, poller, shared_data, health, settings.standby,
@@ -91,6 +95,7 @@ def main() -> int:
     aaos_bridge = AaosBridgeReceiver(
         shared_data,
         pack_capacity_wh=settings.pack_capacity_wh,
+        nav_enabled=settings.aaos_nav_enabled,
     )
     aaos_bridge.start()
     logger.info("AAOS bridge receiver started on :7878")

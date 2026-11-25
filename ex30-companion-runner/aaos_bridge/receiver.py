@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
@@ -46,6 +47,25 @@ WIRE_FIELDS = frozenset({
     "night_mode",
     "pack_capacity_wh", 
 })
+
+NAV_MANEUVERS = frozenset({
+    "straight",
+    "turn_left",
+    "turn_right",
+    "slight_left",
+    "slight_right",
+    "sharp_left",
+    "sharp_right",
+    "uturn",
+    "roundabout",
+    "merge",
+    "exit_left",
+    "exit_right",
+    "destination",
+    "none",
+})
+
+NAV_DISTANCE_RE = re.compile(r"^\d+(?:[.,]\d+)?\s*(?:km|m|mi|ft|yd)$", re.IGNORECASE)
 
 DEFAULT_PORT = 7878
 MAX_LINE_BYTES = 4096
@@ -81,6 +101,7 @@ class AaosBridgeReceiver:
         stale_after_s: float = STALE_AFTER_S,
         pack_capacity_wh: float = 64000.0,
         clock_syncer: Optional[ClockSyncer] = None,
+        nav_enabled: bool = False,
     ) -> None:
         self._shared = shared
         self._host = host
@@ -89,6 +110,7 @@ class AaosBridgeReceiver:
         self._stale_after_s = stale_after_s
         self._pack_capacity_wh = pack_capacity_wh
         self._clock_syncer = clock_syncer if clock_syncer is not None else ClockSyncer()
+        self._nav_enabled = nav_enabled
         # Receiver-local energy integration state for battery_power_mw.
         # Resets when the receiver instance is constructed; not persisted
         # across reboots — same scope as the OBD2 poller's counterpart.
@@ -209,7 +231,7 @@ class AaosBridgeReceiver:
             logger.warning("non-object frame, dropping")
             return
         kind = msg.get("type")
-        if kind not in ("hello", "state", "heartbeat", "goodbye"):
+        if kind not in ("hello", "state", "nav", "heartbeat", "goodbye"):
             logger.warning("unknown frame type: %r", kind)
             return
         # Sync the wall-clock from `ts` BEFORE _mark_fresh() so the freshness
@@ -217,11 +239,16 @@ class AaosBridgeReceiver:
         # Otherwise a 9h jump forward would make the very next stale-loop tick
         # mark the source stale immediately.
         self._clock_syncer.consider(msg.get("ts"))
-        self._log_jsonl(msg)
+        # Privacy invariant: never write navigation frames to the Pi jsonl log.
+        if kind != "nav":
+            self._log_jsonl(msg)
         self._mark_fresh()
 
         if kind == "state":
             self._apply_state(msg)
+        elif kind == "nav":
+            if self._nav_enabled:
+                self._apply_nav(msg)
         elif kind == "hello":
             subs = msg.get("fields_subscribed")
             logger.info(
@@ -231,8 +258,43 @@ class AaosBridgeReceiver:
                 len(subs) if isinstance(subs, list) else -1,
             )
         elif kind == "goodbye":
+            self._clear_nav()
             logger.info("goodbye reason=%s", msg.get("reason"))
         # heartbeat: nothing to do beyond freshness, already handled.
+
+    def _apply_nav(self, msg: dict) -> None:
+        nav = msg.get("nav")
+        if not isinstance(nav, dict):
+            return
+        active = bool(nav.get("active", False))
+        if not active:
+            self._clear_nav()
+            return
+        maneuver = nav.get("maneuver")
+        if not isinstance(maneuver, str) or maneuver not in NAV_MANEUVERS:
+            maneuver = "straight"
+        raw_dist = nav.get("distance")
+        distance = ""
+        if isinstance(raw_dist, str):
+            cand = raw_dist.strip()[:16]
+            if NAV_DISTANCE_RE.match(cand):
+                distance = cand
+        raw_exit = nav.get("exit", 0)
+        exit_num = raw_exit if isinstance(raw_exit, int) and not isinstance(raw_exit, bool) and 1 <= raw_exit <= 9 else 0
+        self._shared.update(
+            nav_active=True,
+            nav_maneuver=maneuver,
+            nav_distance=distance,
+            nav_exit=exit_num,
+        )
+
+    def _clear_nav(self) -> None:
+        self._shared.update(
+            nav_active=False,
+            nav_maneuver="none",
+            nav_distance="",
+            nav_exit=0,
+        )
 
     def _apply_state(self, msg: dict) -> None:
         fields = msg.get("fields")
@@ -358,7 +420,13 @@ class AaosBridgeReceiver:
                 continue
             if time.time() - last > self._stale_after_s:
                 if not self._shared.get("aaos_stale"):
-                    self._shared.update(aaos_stale=True)
+                    self._shared.update(
+                        aaos_stale=True,
+                        nav_active=False,
+                        nav_maneuver="none",
+                        nav_distance="",
+                        nav_exit=0,
+                    )
                     logger.info("AAOS source marked stale (>%.0fs idle)", self._stale_after_s)
 
 

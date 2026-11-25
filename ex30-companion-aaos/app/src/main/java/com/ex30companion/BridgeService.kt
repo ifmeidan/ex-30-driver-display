@@ -41,6 +41,7 @@ class BridgeService : Service() {
             this,
             hostProvider = { BridgeSettings.host(this) },
             parkedState = monitor.state,
+            navEnabledProvider = { BridgeSettings.navEnabled(this) },
         ).also { it.start() }
         // Parked flips also trim/restore the VHAL subscriptions themselves —
         // no 30 Hz power callbacks for a locked, empty car.

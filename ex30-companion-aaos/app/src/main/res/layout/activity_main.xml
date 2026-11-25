@@ -31,6 +31,12 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Soak" />
+
+        <Button
+            android:id="@+id/nav_toggle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Nav: OFF" />
     </LinearLayout>
 
     <FrameLayout

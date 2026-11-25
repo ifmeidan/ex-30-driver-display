@@ -262,3 +262,85 @@ def test_new_connection_drops_old(receiver):
             s2.close()
     finally:
         s1.close()
+
+
+def test_nav_frame_ignored_by_default_and_never_logged(receiver):
+    shared, _, port, tmp_path = receiver
+    _send(port, [
+        {"type": "hello", "ts": 1, "app_version": "1.0.6", "schema_version": 1, "fields_subscribed": []},
+        {"type": "nav", "ts": 2, "src": "aaos", "nav": {
+            "active": True,
+            "maneuver": "turn_right",
+            "distance": "300 m",
+            "exit": 0,
+        }},
+        {"type": "heartbeat", "ts": 3},
+    ])
+    assert _wait_until(lambda: shared.snapshot().aaos_stale is False)
+    snap = shared.snapshot()
+    # Default is opt-out: nav state stays inactive.
+    assert snap.nav_active is False
+    assert snap.nav_maneuver == "none"
+    assert snap.nav_distance == ""
+    # Privacy invariant: `nav` frames are never written to the jsonl log.
+    files = list(tmp_path.glob("aaos_bridge_*.jsonl"))
+    assert files
+    lines = files[0].read_text(encoding="utf-8").splitlines()
+    types = [json.loads(line)["type"] for line in lines]
+    assert "nav" not in types
+    assert "hello" in types
+    assert "heartbeat" in types
+
+
+def test_nav_frame_updates_when_enabled_and_sanitizes_fields(tmp_path):
+    shared = SharedVehicleData()
+    port = _free_port()
+    rec = AaosBridgeReceiver(
+        shared,
+        host="127.0.0.1",
+        port=port,
+        log_dir=str(tmp_path),
+        stale_after_s=0.5,
+        nav_enabled=True,
+    )
+    rec.start()
+    time.sleep(0.1)
+    try:
+        _send(port, [
+            {"type": "nav", "ts": 10, "src": "aaos", "nav": {
+                "active": True,
+                "maneuver": "turn_left",
+                "distance": "450 m",
+                "exit": 0,
+                "street": "Must Be Ignored",
+            }},
+        ])
+        assert _wait_until(lambda: shared.snapshot().nav_active is True)
+        snap = shared.snapshot()
+        assert snap.nav_maneuver == "turn_left"
+        assert snap.nav_distance == "450 m"
+        assert snap.nav_exit == 0
+        assert not hasattr(snap, "street")
+
+        # Arbitrary street text in `distance` or unknown `maneuver` is scrubbed.
+        _send(port, [
+            {"type": "nav", "ts": 11, "src": "aaos", "nav": {
+                "active": True,
+                "maneuver": "arbitrary_street_name",
+                "distance": "123 Main St",
+                "exit": 2,
+            }},
+        ])
+        assert _wait_until(lambda: shared.snapshot().nav_exit == 2)
+        snap = shared.snapshot()
+        assert snap.nav_maneuver == "straight"
+        assert snap.nav_distance == ""
+
+        # Even when only `nav` frames were received, no jsonl file/entry is written.
+        files = list(tmp_path.glob("aaos_bridge_*.jsonl"))
+        assert not files
+
+        # Staleness clears active navigation prompt.
+        assert _wait_until(lambda: shared.snapshot().nav_active is False, timeout=2.0)
+    finally:
+        rec.stop()

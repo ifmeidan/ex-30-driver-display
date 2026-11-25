@@ -92,6 +92,34 @@ first `state` frame after `hello`.
 If the Pi receives no `state` or `heartbeat` for 15s, it marks AAOS source as
 **stale** and the UI greys out AAOS-derived tiles.
 
+### `nav` — experimental opt-in turn-by-turn maneuver update
+
+Emitted **only** when the user explicitly enables the `Nav` opt-in toggle in the
+AAOS app and grants notification listener access, and only on maneuver/distance
+changes. Kept strictly separate from `state` vehicle telemetry.
+
+```json
+{
+  "type": "nav",
+  "ts": 1714723202500,
+  "src": "aaos",
+  "nav": {
+    "active": true,
+    "maneuver": "turn_right",
+    "distance": "300 m",
+    "exit": 0
+  }
+}
+```
+
+- `maneuver` is a closed enum (`straight`, `turn_left`, `turn_right`,
+  `slight_left`, `slight_right`, `sharp_left`, `sharp_right`, `uturn`,
+  `roundabout`, `merge`, `exit_left`, `exit_right`, `destination`, `none`).
+- `distance` carries only numeric distance + unit (e.g. `"300 m"`, `"1.2 km"`).
+- Street names, addresses, ETA, and raw notification text are **never** sent on
+  the wire, and the Pi receiver **never** writes `nav` frames to
+  `aaos_bridge_YYYYMMDD.jsonl` or drive CSV logs.
+
 ### `goodbye` — clean disconnect (best effort)
 
 ```json
