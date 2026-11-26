@@ -25,6 +25,20 @@ object NavStateRepository {
     private val _state = MutableStateFlow(NavState())
     val state: StateFlow<NavState> = _state.asStateFlow()
 
+    @Volatile
+    private var revalidator: (() -> Unit)? = null
+
+    fun setRevalidator(fn: (() -> Unit)?) {
+        revalidator = fn
+    }
+
+    fun revalidate() {
+        try {
+            revalidator?.invoke()
+        } catch (_: Throwable) {
+        }
+    }
+
     fun update(state: NavState) {
         _state.value = state
     }
@@ -78,8 +92,8 @@ object NavNotificationParser {
         "sixth" to 6,
     )
 
-    private val ETA_SUMMARY_REGEX = Regex(
-        """\b(?:\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|dk|dakika|saat)|eta|remaining|kalan)\b|\b\d{1,2}:\d{2}\b""",
+    private val NON_TURN_DISTANCE_REGEX = Regex(
+        """\b(?:\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|dk|dakika|saat)|eta|remaining|kalan|trip\s+length|route\s+length|total|toplam)\b|\b\d{1,2}:\d{2}\b""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -130,11 +144,11 @@ object NavNotificationParser {
     }
 
     private fun extractVerifiedTurnDistance(title: String, body: String): String {
-        if (title.isNotEmpty() && !ETA_SUMMARY_REGEX.containsMatchIn(title)) {
+        if (title.isNotEmpty() && !NON_TURN_DISTANCE_REGEX.containsMatchIn(title)) {
             val fromTitle = extractDistance(title)
             if (fromTitle.isNotEmpty()) return fromTitle
         }
-        if (body.isNotEmpty() && !ETA_SUMMARY_REGEX.containsMatchIn(body)) {
+        if (body.isNotEmpty() && !NON_TURN_DISTANCE_REGEX.containsMatchIn(body)) {
             // Accept body distance only when it's a standalone turn-distance token
             // or there is no separate title line.
             if (title.isEmpty() || PURE_DISTANCE_REGEX.matches(body)) {
@@ -197,11 +211,11 @@ object NavNotificationParser {
         if (hasAny("sola dön", "sola", "turn left", "left")) return "turn_left" to true
         if (hasAny("sağa dön", "sağa", "turn right", "right")) return "turn_right" to true
         if (hasAny("katil", "birleş", "merge")) return "merge" to true
-        if (isExitCue) return "exit_right" to true
         if (hasAny("düz", "devam", "ileri", "straight", "continue", "head ", "keep going")) {
             return "straight" to true
         }
-        // Unknown direction: return "none" so the display suppresses the arrow.
+        // Unknown or ambiguous direction (e.g. bare "Take the exit" with no side):
+        // return "none" so the display suppresses the arrow.
         return "none" to false
     }
 }

@@ -207,6 +207,9 @@ class BridgeClient(
                 delay(NAV_RENEW_MS)
                 if (socketRef.get() == null) continue
                 if (!navEnabledProvider()) continue
+                // Revalidate against live activeNotifications before renewing so a
+                // missed removal callback cannot keep a stale cue alive.
+                NavStateRepository.revalidate()
                 val current = NavStateRepository.state.value
                 if (current.active) {
                     enqueue(buildNavFrame(current).toString())
@@ -426,7 +429,10 @@ class BridgeClient(
                 writer.write("\n")
                 writer.flush()
             }
-            lastSentMs = System.currentTimeMillis()
+            // Keep vehicle heartbeat timer independent of nav frames.
+            if (!line.contains("\"type\":\"nav\"")) {
+                lastSentMs = System.currentTimeMillis()
+            }
         }
     }
 

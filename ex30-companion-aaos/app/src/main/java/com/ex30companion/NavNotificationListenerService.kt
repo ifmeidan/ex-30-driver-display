@@ -31,6 +31,7 @@ class NavNotificationListenerService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        NavStateRepository.setRevalidator { refreshFromActive() }
         if (BridgeSettings.navEnabled(this)) {
             refreshFromActive()
         } else {
@@ -39,6 +40,7 @@ class NavNotificationListenerService : NotificationListenerService() {
     }
 
     override fun onListenerDisconnected() {
+        NavStateRepository.setRevalidator(null)
         activeNavKey = null
         NavStateRepository.clear()
         super.onListenerDisconnected()
