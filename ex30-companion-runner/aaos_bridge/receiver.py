@@ -65,6 +65,13 @@ NAV_MANEUVERS = frozenset({
     "none",
 })
 
+NAV_ARRIVALS = frozenset({
+    "destination",
+    "destination_left",
+    "destination_right",
+    "none",
+})
+
 NAV_DISTANCE_RE = re.compile(r"^\d+(?:[.,]\d+)?\s*(?:km|m|mi|ft|yd)$", re.IGNORECASE)
 
 DEFAULT_PORT = 7878
@@ -103,6 +110,7 @@ class AaosBridgeReceiver:
         clock_syncer: Optional[ClockSyncer] = None,
         nav_enabled: bool = False,
         nav_stale_after_s: Optional[float] = None,
+        nav_diag: bool = False,
     ) -> None:
         self._shared = shared
         self._host = host
@@ -113,6 +121,7 @@ class AaosBridgeReceiver:
         self._clock_syncer = clock_syncer if clock_syncer is not None else ClockSyncer()
         self._nav_enabled = nav_enabled
         self._nav_stale_after_s = stale_after_s if nav_stale_after_s is None else nav_stale_after_s
+        self._nav_diag = nav_diag
         self._nav_last_ts: float = 0.0
         # Receiver-local energy integration state for battery_power_mw.
         # Resets when the receiver instance is constructed; not persisted
@@ -188,6 +197,7 @@ class AaosBridgeReceiver:
         with self._conn_lock:
             prev = self._active
             self._active = conn
+            self._clear_nav(reason="new_connection")
         if prev is not None:
             logger.info("dropping previous connection in favor of %s", addr)
             try:
@@ -201,6 +211,9 @@ class AaosBridgeReceiver:
                 raw = stream.readline(MAX_LINE_BYTES + 1)
                 if not raw:
                     break
+                with self._conn_lock:
+                    if self._active is not conn:
+                        break
                 if len(raw) > MAX_LINE_BYTES:
                     logger.warning("oversized line (%d bytes), dropping", len(raw))
                     # Drain to next newline so we don't desync on the next call.
@@ -218,6 +231,7 @@ class AaosBridgeReceiver:
             with self._conn_lock:
                 if self._active is conn:
                     self._active = None
+                    self._clear_nav(reason="disconnected")
             logger.info("disconnected: %s", addr)
 
     # --- frame handling ---------------------------------------------------
@@ -254,6 +268,7 @@ class AaosBridgeReceiver:
         if kind == "state":
             self._apply_state(msg)
         elif kind == "hello":
+            self._clear_nav(reason="hello")
             subs = msg.get("fields_subscribed")
             logger.info(
                 "hello v=%s schema=%s fields=%d",
@@ -262,7 +277,7 @@ class AaosBridgeReceiver:
                 len(subs) if isinstance(subs, list) else -1,
             )
         elif kind == "goodbye":
-            self._clear_nav()
+            self._clear_nav(reason=f"goodbye:{msg.get('reason', 'unknown')}")
             logger.info("goodbye reason=%s", msg.get("reason"))
         # heartbeat: nothing to do beyond freshness, already handled.
 
@@ -272,11 +287,14 @@ class AaosBridgeReceiver:
             return
         active = bool(nav.get("active", False))
         if not active:
-            self._clear_nav()
+            self._clear_nav(reason="nav_inactive")
             return
         maneuver = nav.get("maneuver")
         if not isinstance(maneuver, str) or maneuver not in NAV_MANEUVERS:
             maneuver = "none"
+        arrival = nav.get("arrival", "none")
+        if not isinstance(arrival, str) or arrival not in NAV_ARRIVALS:
+            arrival = "none"
         raw_dist = nav.get("distance")
         distance = ""
         if isinstance(raw_dist, str):
@@ -284,23 +302,51 @@ class AaosBridgeReceiver:
             if NAV_DISTANCE_RE.match(cand):
                 distance = cand
         raw_exit = nav.get("exit", 0)
-        exit_num = raw_exit if isinstance(raw_exit, int) and not isinstance(raw_exit, bool) and 1 <= raw_exit <= 9 else 0
+        exit_num = (
+            raw_exit
+            if maneuver == "roundabout"
+            and isinstance(raw_exit, int)
+            and not isinstance(raw_exit, bool)
+            and 1 <= raw_exit <= 9
+            else 0
+        )
+        prev_tuple = (
+            self._shared.get("nav_active"),
+            self._shared.get("nav_maneuver"),
+            self._shared.get("nav_distance"),
+            self._shared.get("nav_arrival"),
+            self._shared.get("nav_exit"),
+        )
+        new_tuple = (True, maneuver, distance, arrival, exit_num)
         self._nav_last_ts = time.monotonic()
         self._shared.update(
             nav_active=True,
             nav_maneuver=maneuver,
             nav_distance=distance,
+            nav_arrival=arrival,
             nav_exit=exit_num,
         )
+        if self._nav_diag and new_tuple != prev_tuple:
+            logger.info(
+                "nav state: active=True maneuver=%s distance=%r arrival=%s exit=%d",
+                maneuver,
+                distance,
+                arrival,
+                exit_num,
+            )
 
-    def _clear_nav(self) -> None:
+    def _clear_nav(self, reason: str = "cleared") -> None:
+        was_active = bool(self._shared.get("nav_active"))
         self._nav_last_ts = 0.0
         self._shared.update(
             nav_active=False,
             nav_maneuver="none",
             nav_distance="",
+            nav_arrival="none",
             nav_exit=0,
         )
+        if self._nav_diag and was_active:
+            logger.info("nav cleared: reason=%s", reason)
 
     def _apply_state(self, msg: dict) -> None:
         fields = msg.get("fields")
@@ -425,11 +471,11 @@ class AaosBridgeReceiver:
             if last and time.time() - last > self._stale_after_s:
                 if not self._shared.get("aaos_stale"):
                     self._shared.update(aaos_stale=True)
-                    self._clear_nav()
+                    self._clear_nav(reason="aaos_stale")
                     logger.info("AAOS source marked stale (>%.0fs idle)", self._stale_after_s)
             if self._nav_last_ts > 0.0 and (time.monotonic() - self._nav_last_ts) > self._nav_stale_after_s:
                 if self._shared.get("nav_active"):
-                    self._clear_nav()
+                    self._clear_nav(reason="nav_timeout")
                     logger.info("AAOS nav cue timed out (>%.1fs without nav renewal)", self._nav_stale_after_s)
 
 
@@ -443,6 +489,8 @@ def _main() -> int:
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--log-dir", default="logs")
+    ap.add_argument("--aaos-nav", action="store_true", help="Enable experimental AAOS nav receiver (opt-in)")
+    ap.add_argument("--aaos-nav-diag", action="store_true", help="Log accepted nav state changes and clear reasons")
     args = ap.parse_args()
 
     logging.basicConfig(
@@ -450,7 +498,14 @@ def _main() -> int:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
     shared = SharedVehicleData()
-    rec = AaosBridgeReceiver(shared, host=args.host, port=args.port, log_dir=args.log_dir)
+    rec = AaosBridgeReceiver(
+        shared,
+        host=args.host,
+        port=args.port,
+        log_dir=args.log_dir,
+        nav_enabled=args.aaos_nav,
+        nav_diag=args.aaos_nav_diag,
+    )
     rec.start()
     try:
         while True:

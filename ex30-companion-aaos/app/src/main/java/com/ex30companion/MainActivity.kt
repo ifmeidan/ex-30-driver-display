@@ -51,6 +51,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.navToggle.setOnLongClickListener {
             BridgeSettings.setNavEnabled(this, false)
+            NavNotificationSelector.reset()
             NavStateRepository.clear()
             renderNavStatus()
             true
@@ -136,6 +137,7 @@ class MainActivity : AppCompatActivity() {
                     openNotificationListenerSettings()
                 } else {
                     NavNotificationListenerService.ensureRebind(this)
+                    NavStateRepository.revalidate()
                 }
             }
             !granted -> {
@@ -145,6 +147,7 @@ class MainActivity : AppCompatActivity() {
             }
             else -> {
                 BridgeSettings.setNavEnabled(this, false)
+                NavNotificationSelector.reset()
                 NavStateRepository.clear()
             }
         }

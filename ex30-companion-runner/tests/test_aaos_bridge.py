@@ -329,34 +329,122 @@ def test_nav_frame_updates_when_enabled_and_expires_independently_of_heartbeats(
     time.sleep(0.1)
     try:
         # Unknown maneuver maps to "none" (suppresses arrow), arbitrary street
-        # text in distance is scrubbed, and nav frame does not touch clock_syncer
-        # or telemetry freshness.
-        _send(port, [
-            {"type": "nav", "ts": 10, "src": "aaos", "nav": {
-                "active": True,
-                "maneuver": "arbitrary_street_name",
-                "distance": "123 Main St",
-                "exit": 2,
-                "street": "Must Be Ignored",
-            }},
-        ])
-        assert _wait_until(lambda: shared.snapshot().nav_active is True)
-        snap = shared.snapshot()
-        assert snap.nav_maneuver == "none"
-        assert snap.nav_distance == ""
-        assert snap.nav_exit == 2
-        assert not hasattr(snap, "street")
-        assert snap.aaos_stale is True
-        assert clock_calls == []
-        assert not list(tmp_path.glob("aaos_bridge_*.jsonl"))
+        # text in distance is scrubbed, non-roundabout exit is zeroed, and nav
+        # frame does not touch clock_syncer or telemetry freshness.
+        with socket.create_connection(("127.0.0.1", port), timeout=2.0) as s:
+            s.sendall((json.dumps({
+                "type": "nav",
+                "ts": 10,
+                "src": "aaos",
+                "nav": {
+                    "active": True,
+                    "maneuver": "arbitrary_street_name",
+                    "distance": "123 Main St",
+                    "exit": 2,
+                    "street": "Must Be Ignored",
+                },
+            }) + "\n").encode("utf-8"))
+            assert _wait_until(lambda: shared.snapshot().nav_active is True)
+            snap = shared.snapshot()
+            assert snap.nav_maneuver == "none"
+            assert snap.nav_distance == ""
+            assert snap.nav_exit == 0
+            assert not hasattr(snap, "street")
+            assert snap.aaos_stale is True
+            assert clock_calls == []
+            assert not list(tmp_path.glob("aaos_bridge_*.jsonl"))
 
-        # Vehicle heartbeats keep telemetry fresh, yet the unrenewed nav cue
-        # still expires on its own timeout.
-        _send(port, [{"type": "heartbeat", "ts": 20}])
-        assert _wait_until(lambda: shared.snapshot().aaos_stale is False)
-        time.sleep(0.25)
-        _send(port, [{"type": "heartbeat", "ts": 21}])
-        assert _wait_until(lambda: shared.snapshot().nav_active is False, timeout=1.5)
-        assert shared.snapshot().aaos_stale is False
+            # Vehicle heartbeats on the same session keep telemetry fresh, yet
+            # the unrenewed nav cue still expires on its own timeout.
+            s.sendall((json.dumps({"type": "heartbeat", "ts": 20}) + "\n").encode("utf-8"))
+            assert _wait_until(lambda: shared.snapshot().aaos_stale is False)
+            time.sleep(0.25)
+            s.sendall((json.dumps({"type": "heartbeat", "ts": 21}) + "\n").encode("utf-8"))
+            assert _wait_until(lambda: shared.snapshot().nav_active is False, timeout=1.5)
+            assert shared.snapshot().aaos_stale is False
+    finally:
+        rec.stop()
+
+
+def test_new_session_clears_previous_nav_cue_and_logs_diag_without_late_clobber(tmp_path, caplog):
+    shared = SharedVehicleData()
+    port = _free_port()
+    rec = AaosBridgeReceiver(
+        shared,
+        host="127.0.0.1",
+        port=port,
+        log_dir=str(tmp_path),
+        stale_after_s=5.0,
+        nav_stale_after_s=5.0,
+        nav_enabled=True,
+        nav_diag=True,
+    )
+    rec.start()
+    time.sleep(0.1)
+    try:
+        with caplog.at_level("INFO", logger="aaos_bridge"):
+            s1 = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+            try:
+                s1.sendall((json.dumps({
+                    "type": "nav",
+                    "ts": 1,
+                    "src": "aaos",
+                    "nav": {
+                        "active": True,
+                        "maneuver": "turn_left",
+                        "distance": "300 m",
+                        "arrival": "destination_right",
+                        "exit": 2,  # non-roundabout exit must be zeroed
+                    },
+                }) + "\n").encode("utf-8"))
+                assert _wait_until(lambda: shared.snapshot().nav_active is True)
+                snap = shared.snapshot()
+                assert snap.nav_maneuver == "turn_left"
+                assert snap.nav_distance == "300 m"
+                assert snap.nav_arrival == "destination_right"
+                assert snap.nav_exit == 0
+
+                # New session connects before s1 closes: previous session's nav cue
+                # must clear immediately even if the new session only sends heartbeats.
+                s2 = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+                try:
+                    s2.sendall((json.dumps({"type": "heartbeat", "ts": 2}) + "\n").encode("utf-8"))
+                    assert _wait_until(lambda: shared.snapshot().nav_active is False)
+                    assert shared.snapshot().nav_maneuver == "none"
+                    assert shared.snapshot().nav_arrival == "none"
+
+                    # Now s2 sends a new nav cue, and s1 closes afterwards: s1's late
+                    # cleanup must NOT wipe out s2's active cue.
+                    s2.sendall((json.dumps({
+                        "type": "nav",
+                        "ts": 3,
+                        "src": "aaos",
+                        "nav": {
+                            "active": True,
+                            "maneuver": "roundabout",
+                            "distance": "150 m",
+                            "arrival": "none",
+                            "exit": 2,
+                        },
+                    }) + "\n").encode("utf-8"))
+                    assert _wait_until(lambda: shared.snapshot().nav_maneuver == "roundabout")
+                    s1.close()
+                    time.sleep(0.15)
+                    snap2 = shared.snapshot()
+                    assert snap2.nav_active is True
+                    assert snap2.nav_maneuver == "roundabout"
+                    assert snap2.nav_exit == 2
+                finally:
+                    s2.close()
+                assert _wait_until(lambda: shared.snapshot().nav_active is False)
+            finally:
+                try:
+                    s1.close()
+                except OSError:
+                    pass
+
+            diag_text = "\n".join(r.getMessage() for r in caplog.records)
+            assert "nav state: active=True maneuver=turn_left distance='300 m' arrival=destination_right exit=0" in diag_text
+            assert "nav cleared: reason=" in diag_text
     finally:
         rec.stop()

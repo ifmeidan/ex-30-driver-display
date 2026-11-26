@@ -14,115 +14,140 @@ import androidx.core.app.NotificationManagerCompat
 import java.util.Locale
 
 /**
- * Experimental, opt-in listener for ongoing navigation notifications on the
- * head unit (e.g. built-in Google Maps or Waze).
+ * Experimental, opt-in listener for ongoing Google Maps navigation guidance
+ * notifications on the head unit (`com.google.android.apps.maps`).
  *
  * Privacy & safety invariants:
  * - Inert unless both system notification access AND the in-app opt-in toggle
  *   ([BridgeSettings.navEnabled]) are enabled.
- * - Extracts only canonical maneuver + distance via [NavNotificationParser];
- *   street names, addresses, and raw notification strings are never stored,
- *   transmitted, or logged.
+ * - Pre-filters by exact package name, non-group-summary, and active guidance
+ *   flags/category before reading any notification content.
+ * - Serializes callbacks and refreshes so an in-flight refresh can never
+ *   overwrite a newer callback or resurrect a removed cue.
  */
 class NavNotificationListenerService : NotificationListenerService() {
 
-    @Volatile
-    private var activeNavKey: String? = null
+    private val serviceLock = Any()
 
     override fun onListenerConnected() {
         super.onListenerConnected()
         NavStateRepository.setRevalidator { refreshFromActive() }
-        if (BridgeSettings.navEnabled(this)) {
+        if (isOptedInAndPermitted()) {
             refreshFromActive()
         } else {
+            NavNotificationSelector.reset()
             NavStateRepository.clear()
         }
     }
 
     override fun onListenerDisconnected() {
         NavStateRepository.setRevalidator(null)
-        activeNavKey = null
-        NavStateRepository.clear()
+        synchronized(serviceLock) {
+            NavNotificationSelector.reset()
+            NavStateRepository.clear()
+        }
         super.onListenerDisconnected()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         if (sbn == null) return
-        if (!BridgeSettings.navEnabled(this)) {
-            NavStateRepository.clear()
-            return
-        }
-        if (!isCandidateNavigation(sbn)) return
+        synchronized(serviceLock) {
+            if (!isOptedInAndPermitted()) {
+                NavNotificationSelector.reset()
+                NavStateRepository.clear()
+                return
+            }
+            // Filter source package and guidance flags BEFORE reading content.
+            if (!isEligibleGoogleMapsGuidance(sbn)) {
+                if (sbn.key == NavNotificationSelector.currentTrackedKey()) {
+                    refreshFromActiveLocked()
+                }
+                return
+            }
 
-        val parsed = parseNotification(sbn.notification)
-        if (parsed.active) {
-            // Live post takeover: a notification that actively posts a valid cue
-            // becomes the tracked source immediately, while periodic refreshes
-            // (refreshFromActive) stay pinned to activeNavKey until it is removed.
-            activeNavKey = sbn.key
-            NavStateRepository.update(parsed)
-        } else if (sbn.key == activeNavKey) {
-            refreshFromActive()
+            val parsed = parseNotification(sbn.notification)
+            val activeKeys = currentEligibleKeysOrNull()
+            if (parsed.active) {
+                if (NavNotificationSelector.shouldAcceptPost(sbn.key, parsed, activeKeys)) {
+                    NavStateRepository.update(parsed)
+                }
+            } else if (sbn.key == NavNotificationSelector.currentTrackedKey()) {
+                refreshFromActiveLocked()
+            }
         }
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         if (sbn == null) return
-        if (!BridgeSettings.navEnabled(this)) {
-            activeNavKey = null
-            NavStateRepository.clear()
-            return
-        }
-        if (sbn.key == activeNavKey) {
-            refreshFromActive()
+        synchronized(serviceLock) {
+            if (!isOptedInAndPermitted()) {
+                NavNotificationSelector.reset()
+                NavStateRepository.clear()
+                return
+            }
+            if (sbn.key == NavNotificationSelector.currentTrackedKey() ||
+                sbn.packageName == NavNotificationSelector.GOOGLE_MAPS_PACKAGE
+            ) {
+                refreshFromActiveLocked()
+            }
         }
     }
 
     private fun refreshFromActive() {
-        if (!BridgeSettings.navEnabled(this)) {
-            activeNavKey = null
+        synchronized(serviceLock) {
+            refreshFromActiveLocked()
+        }
+    }
+
+    private fun refreshFromActiveLocked() {
+        if (!isOptedInAndPermitted()) {
+            NavNotificationSelector.reset()
             NavStateRepository.clear()
             return
         }
+        val seqBefore = NavStateRepository.currentSeq()
         val active = try {
             activeNotifications
         } catch (_: Throwable) {
             null
         }
-        if (active != null) {
-            val candidates = active.mapNotNull { sbn ->
-                if (!isCandidateNavigation(sbn)) null
-                else sbn.key to parseNotification(sbn.notification)
-            }
-            val (selectedKey, selectedState) = NavNotificationSelector.selectActive(candidates, activeNavKey)
-            activeNavKey = selectedKey
-            if (selectedState.active) {
-                NavStateRepository.update(selectedState)
-            } else {
-                NavStateRepository.clear()
-            }
+        if (active == null) {
+            NavNotificationSelector.reset()
+            NavStateRepository.clear()
             return
         }
-        activeNavKey = null
-        NavStateRepository.clear()
+
+        val candidates = active.mapNotNull { sbn ->
+            if (!isEligibleGoogleMapsGuidance(sbn)) null
+            else sbn.key to parseNotification(sbn.notification)
+        }
+        val (_, selectedState) = NavNotificationSelector.selectActive(candidates)
+        if (!isOptedInAndPermitted()) {
+            NavNotificationSelector.reset()
+            NavStateRepository.clear()
+            return
+        }
+        NavStateRepository.applyRefreshIfUnchanged(seqBefore, selectedState)
     }
 
-    private fun isCandidateNavigation(sbn: StatusBarNotification): Boolean {
-        val n = sbn.notification ?: return false
-        if ((n.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return false
-        if (n.category == Notification.CATEGORY_NAVIGATION) return true
-        val pkg = sbn.packageName.lowercase(Locale.US)
-        if (pkg in NAV_PACKAGES) return true
-        return pkg.contains("maps") || pkg.contains("navi") || pkg.contains("waze") ||
-            pkg.contains("osmand") || pkg.contains("sygic")
+    private fun currentEligibleKeysOrNull(): Set<String>? = try {
+        activeNotifications
+            ?.filter { isEligibleGoogleMapsGuidance(it) }
+            ?.map { it.key }
+            ?.toSet()
+    } catch (_: Throwable) {
+        null
     }
+
+    private fun isOptedInAndPermitted(): Boolean =
+        BridgeSettings.navEnabled(this) && isPermissionGranted(this)
 
     private fun parseNotification(notification: Notification): NavState {
         val extras = notification.extras ?: Bundle.EMPTY
         var title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
             ?: extras.getCharSequence(Notification.EXTRA_TITLE_BIG)?.toString()
         val textLines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
-            ?.joinToString(" · ") { it.toString() }
+            ?.joinToString("\n") { it.toString() }
         var text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
             ?: textLines
         var bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
@@ -135,7 +160,7 @@ class NavNotificationListenerService : NotificationListenerService() {
         if (rvStrings.isNotEmpty()) {
             if (title.isNullOrBlank()) title = rvStrings[0]
             if (text.isNullOrBlank() && rvStrings.size >= 2) text = rvStrings[1]
-            if (bigText.isNullOrBlank() && rvStrings.size >= 3) bigText = rvStrings.joinToString(" · ")
+            if (bigText.isNullOrBlank() && rvStrings.size >= 3) bigText = rvStrings.joinToString("\n")
         }
         if (title.isNullOrBlank() && text.isNullOrBlank() && !ticker.isNullOrBlank()) {
             text = ticker
@@ -145,7 +170,7 @@ class NavNotificationListenerService : NotificationListenerService() {
             title = title,
             text = text,
             bigText = bigText ?: ticker,
-            iconHint = rvData.descriptions.joinToString(" "),
+            iconHint = rvData.descriptions.joinToString("\n"),
         )
     }
 
@@ -173,7 +198,7 @@ class NavNotificationListenerService : NotificationListenerService() {
 
     private fun collectViews(v: View?, texts: MutableSet<String>, descs: MutableSet<String>) {
         if (v == null || v.visibility == View.GONE) return
-        v.contentDescription?.toString()?.replace(Regex("""\s+"""), " ")?.trim()?.let { desc ->
+        v.contentDescription?.toString()?.replace(Regex("""[^\S\r\n]+"""), " ")?.trim()?.let { desc ->
             if (desc.isNotEmpty() && desc.lowercase(Locale("tr", "TR")) !in ACTION_LABELS) {
                 descs.add(desc)
             }
@@ -190,23 +215,42 @@ class NavNotificationListenerService : NotificationListenerService() {
     }
 
     companion object {
-        private val NAV_PACKAGES = setOf(
-            "com.google.android.apps.maps",
-            "com.google.android.apps.gmm",
-            "com.waze",
-            "com.sygic.aura",
-            "com.iternio.abrpapp",
-            "ru.yandex.yandexnavi",
-            "com.here.app.maps",
-            "net.osmand",
-            "net.osmand.plus",
-        )
-
         private val ACTION_LABELS = setOf(
             "çık", "çıkış", "exit", "iptal", "cancel", "durdur", "stop",
             "kapat", "dismiss", "sesi kapat", "mute", "sesi aç", "unmute",
             "google haritalar", "google maps", "haritalar", "maps", "navigasyon",
         )
+
+        /**
+         * Pure source & metadata filter checked BEFORE reading notification text.
+         * Accepts only ongoing navigation guidance notifications from Google Maps
+         * (`com.google.android.apps.maps`), rejecting group summaries and
+         * non-guidance categories.
+         */
+        fun isEligibleGoogleMapsGuidance(
+            packageName: String?,
+            flags: Int,
+            category: String?,
+            isOngoing: Boolean,
+        ): Boolean {
+            if (packageName != NavNotificationSelector.GOOGLE_MAPS_PACKAGE) return false
+            if ((flags and Notification.FLAG_GROUP_SUMMARY) != 0) return false
+            val ongoingFlag = isOngoing || (flags and Notification.FLAG_ONGOING_EVENT) != 0
+            if (category == Notification.CATEGORY_NAVIGATION) return true
+            if (!ongoingFlag) return false
+            return category == null || category == Notification.CATEGORY_SERVICE ||
+                category == Notification.CATEGORY_TRANSPORT || category == Notification.CATEGORY_PROGRESS
+        }
+
+        fun isEligibleGoogleMapsGuidance(sbn: StatusBarNotification): Boolean {
+            val n = sbn.notification ?: return false
+            return isEligibleGoogleMapsGuidance(
+                packageName = sbn.packageName,
+                flags = n.flags,
+                category = n.category,
+                isOngoing = sbn.isOngoing,
+            )
+        }
 
         fun isPermissionGranted(context: Context): Boolean =
             context.packageName in NotificationManagerCompat.getEnabledListenerPackages(context)

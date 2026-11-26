@@ -95,8 +95,10 @@ If the Pi receives no `state` or `heartbeat` for 15s, it marks AAOS source as
 ### `nav` — experimental opt-in turn-by-turn maneuver update
 
 Emitted **only** when the user explicitly enables the `Nav` opt-in toggle in the
-AAOS app and grants notification listener access, and only on maneuver/distance
-changes. Kept strictly separate from `state` vehicle telemetry.
+AAOS app and grants notification listener access, and only for ongoing navigation
+guidance notifications from Google Maps (`com.google.android.apps.maps`). Kept
+strictly separate from `state` vehicle telemetry, vehicle `heartbeat` scheduling,
+and wall-clock sync.
 
 ```json
 {
@@ -107,18 +109,52 @@ changes. Kept strictly separate from `state` vehicle telemetry.
     "active": true,
     "maneuver": "turn_right",
     "distance": "300 m",
+    "arrival": "none",
     "exit": 0
   }
 }
 ```
 
-- `maneuver` is a closed enum (`straight`, `turn_left`, `turn_right`,
-  `slight_left`, `slight_right`, `sharp_left`, `sharp_right`, `uturn`,
-  `roundabout`, `merge`, `exit_left`, `exit_right`, `destination`, `none`).
-- `distance` carries only numeric distance + unit (e.g. `"300 m"`, `"1.2 km"`).
-- Street names, addresses, ETA, and raw notification text are **never** sent on
-  the wire, and the Pi receiver **never** writes `nav` frames to
-  `aaos_bridge_YYYYMMDD.jsonl` or drive CSV logs.
+- **Opt-in on both ends (default off):**
+  - AAOS app: `Nav: OFF` button in `MainActivity` (`BridgeSettings.navEnabled`,
+    default `false`). Tapping enables the toggle and opens AAOS Notification
+    Access settings (`Nav: Grant` until granted, `Nav: ON` once active; tap when
+    `ON` or long-press resets to `Nav: OFF` and clears state).
+  - Pi receiver: `AaosBridgeReceiver(..., nav_enabled=False)` / `main.py --aaos-nav`
+    (default `False`).
+- **Source & field constraints:**
+  - Pre-filtered to ongoing navigation guidance notifications from
+    `com.google.android.apps.maps` (group summaries and non-guidance categories
+    are rejected before content inspection).
+  - `maneuver` is a closed enum (`straight`, `turn_left`, `turn_right`,
+    `slight_left`, `slight_right`, `sharp_left`, `sharp_right`, `uturn`,
+    `roundabout`, `merge`, `exit_left`, `exit_right`, `destination`, `none`).
+    When direction is unknown, `maneuver` is `"none"` so no arrow is shown.
+  - `distance` carries only verified next-maneuver distance + unit (e.g.
+    `"300 m"`, `"3.7 mi"`, `"1,2 km"`). Route-total / ETA / remaining-distance
+    clauses are excluded.
+  - `arrival` is a closed enum (`destination`, `destination_left`,
+    `destination_right`, `none`) indicating arrival or which side of the road
+    the destination is on.
+  - `exit` (`1..9`, or `0`) is populated only for `roundabout` maneuvers.
+- **Reconnect, renewal & timeout contract:**
+  - Sender uses a single conflated slot for `nav` frames (no queued history of
+    old turns). On connect/reconnect, immediately after `hello`, the sender
+    revalidates live `activeNotifications` and sends only the single latest
+    validated state (including `active: false` when no route is active).
+  - While a cue is active, the sender revalidates against live
+    `activeNotifications` every 5s and renews the frame only if the notification
+    is still present and permitted.
+  - Receiver enforces an independent 15s `nav_stale_after_s` timeout (unaffected
+    by vehicle `heartbeat` frames) and clears any previous session's cue on new
+    connect, `hello`, `goodbye`, or disconnect.
+- **Privacy & Pi diagnostic switch:**
+  - Street names, destination names/addresses, ETA, and raw notification text
+    are **never** stored, sent on the wire, or written to
+    `aaos_bridge_YYYYMMDD.jsonl` or drive CSV logs.
+  - Passing `--aaos-nav-diag` (`nav_diag=True`, default `False`) on the Pi logs
+    only sanitized state transitions (`nav state: active=True maneuver=... distance=... arrival=... exit=...`)
+    and clear reasons (`nav cleared: reason=...`).
 
 ### `goodbye` — clean disconnect (best effort)
 

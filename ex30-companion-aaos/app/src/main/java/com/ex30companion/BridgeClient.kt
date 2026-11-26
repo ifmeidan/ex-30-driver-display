@@ -44,6 +44,9 @@ class BridgeClient(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sendQueue = Channel<String>(capacity = QUEUE_CAPACITY)
+    // Conflated single-slot holder for `type: "nav"` frames so offline/stalled
+    // periods never accumulate a backlog of stale turns (`old left -> old right -> clear`).
+    private val pendingNavFrame = AtomicReference<String?>(null)
     private val pendingChanges = mutableMapOf<String, Any>()
     private val pendingLock = Any()
     // Serializes direct writes (hello / goodbye / synthetic parked frame)
@@ -173,6 +176,7 @@ class BridgeClient(
 
     private fun drainQueue() {
         while (sendQueue.tryReceive().isSuccess) { /* drop stale frames */ }
+        pendingNavFrame.set(null)
         synchronized(pendingLock) { pendingChanges.clear() }
     }
 
@@ -195,32 +199,51 @@ class BridgeClient(
     }
 
     /**
-     * Emits standalone `{"type": "nav", ...}` frames, separate from vehicle
-     * `state` telemetry and gated by the in-app opt-in toggle. Also renews
-     * active cues periodically so the receiver's independent nav timeout stays
-     * fresh only while the cue is still valid.
+     * Emits standalone `{"type": "nav", ...}` frames via a single conflated
+     * slot ([pendingNavFrame]), separate from vehicle `state` telemetry and
+     * gated by the in-app opt-in toggle + notification listener permission.
      */
     private suspend fun observeNavigation() {
-        var lastSent = NavState()
+        var lastSent: NavState? = null
+        var wasOptedIn = false
         scope.launch {
             while (isActive) {
                 delay(NAV_RENEW_MS)
-                if (socketRef.get() == null) continue
-                if (!navEnabledProvider()) continue
+                val optedIn = navEnabledProvider() && NavNotificationListenerService.isPermissionGranted(context)
+                if (!optedIn) {
+                    if (wasOptedIn || NavStateRepository.state.value.active) {
+                        wasOptedIn = false
+                        NavNotificationSelector.reset()
+                        NavStateRepository.clear()
+                        lastSent = NavState()
+                        if (socketRef.get() != null) {
+                            pendingNavFrame.set(buildNavFrame(NavState()).toString())
+                        }
+                    }
+                    continue
+                }
+                wasOptedIn = true
                 // Revalidate against live activeNotifications before renewing so a
-                // missed removal callback cannot keep a stale cue alive.
-                NavStateRepository.revalidate()
+                // missed removal callback or revoked permission cannot keep a stale cue alive.
+                if (!NavStateRepository.revalidate()) continue
                 val current = NavStateRepository.state.value
-                if (current.active) {
-                    enqueue(buildNavFrame(current).toString())
+                lastSent = current
+                if (current.active && socketRef.get() != null) {
+                    pendingNavFrame.set(buildNavFrame(current).toString())
                 }
             }
         }
         NavStateRepository.state.collect { raw ->
-            val effective = if (navEnabledProvider()) raw else NavState()
+            val optedIn = navEnabledProvider() && NavNotificationListenerService.isPermissionGranted(context)
+            val effective = if (optedIn) raw else NavState()
             if (effective == lastSent) return@collect
             lastSent = effective
-            enqueue(buildNavFrame(effective).toString())
+            if (socketRef.get() != null && (optedIn || wasOptedIn || !effective.active)) {
+                if (optedIn || wasOptedIn) {
+                    pendingNavFrame.set(buildNavFrame(effective).toString())
+                }
+            }
+            wasOptedIn = optedIn
         }
     }
 
@@ -234,6 +257,7 @@ class BridgeClient(
                 put("active", nav.active)
                 put("maneuver", if (nav.active) nav.maneuver else "none")
                 put("distance", if (nav.active) nav.distance else "")
+                put("arrival", if (nav.active) nav.arrival else "none")
                 put("exit", if (nav.active) nav.exitNumber else 0)
             },
         )
@@ -405,17 +429,35 @@ class BridgeClient(
                 pendingChanges[wire.field] = wire.value
             }
         }
+        // Discard any pre-connect nav frame and send only the single latest
+        // validated state after `hello` (including an inactive state when no route is active).
+        pendingNavFrame.set(null)
         if (navEnabledProvider()) {
-            val nav = NavStateRepository.state.value
-            if (nav.active) {
-                enqueue(buildNavFrame(nav).toString())
+            val permitted = NavNotificationListenerService.isPermissionGranted(context)
+            if (!permitted) {
+                NavNotificationSelector.reset()
+                NavStateRepository.clear()
+            } else {
+                NavStateRepository.revalidate()
             }
+            val current = if (permitted) NavStateRepository.state.value else NavState()
+            pendingNavFrame.set(buildNavFrame(current).toString())
         }
     }
 
     private suspend fun runWriter(socket: Socket) = withContext(Dispatchers.IO) {
         val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
         while (true) {
+            val navLine = pendingNavFrame.getAndSet(null)
+            if (navLine != null) {
+                if (socketRef.get() !== socket) return@withContext
+                synchronized(writeLock) {
+                    writer.write(navLine)
+                    writer.write("\n")
+                    writer.flush()
+                }
+                continue
+            }
             // Poll with a timeout instead of blocking forever on the channel:
             // when parked mode (or a network drop) swaps the socket out from
             // under us, this loop must end so the connection loop can get
@@ -429,10 +471,7 @@ class BridgeClient(
                 writer.write("\n")
                 writer.flush()
             }
-            // Keep vehicle heartbeat timer independent of nav frames.
-            if (!line.contains("\"type\":\"nav\"")) {
-                lastSentMs = System.currentTimeMillis()
-            }
+            lastSentMs = System.currentTimeMillis()
         }
     }
 
