@@ -200,7 +200,7 @@ reverse-engineered into a data source:
 
 The EX30 Companion app is distributed through the **Google Play closed testing
 track**. To see what changed in your build and how to set it up, read the
-[Companion version notes](CHANGELOG.md).
+[AAOS and Raspberry Pi runner version notes](CHANGELOG.md).
 
 **To join**: open an issue on this repository (or contact
 [@ifmeidan](https://github.com/ifmeidan)) with the Google account email

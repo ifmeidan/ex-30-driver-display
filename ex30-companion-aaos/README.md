@@ -15,7 +15,7 @@ today, public once the conditions are met — see the
 [setup guide](../SETUP.md)).
 
 For changes to Wi-Fi, Android compatibility and optional features in each build,
-see the [Companion version notes](../CHANGELOG.md).
+see the [AAOS and Raspberry Pi runner version notes](../CHANGELOG.md).
 
 ## What it does
 
