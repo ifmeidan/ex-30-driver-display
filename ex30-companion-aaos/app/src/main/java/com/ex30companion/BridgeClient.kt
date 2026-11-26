@@ -196,10 +196,23 @@ class BridgeClient(
 
     /**
      * Emits standalone `{"type": "nav", ...}` frames, separate from vehicle
-     * `state` telemetry and gated by the in-app opt-in toggle.
+     * `state` telemetry and gated by the in-app opt-in toggle. Also renews
+     * active cues periodically so the receiver's independent nav timeout stays
+     * fresh only while the cue is still valid.
      */
     private suspend fun observeNavigation() {
         var lastSent = NavState()
+        scope.launch {
+            while (isActive) {
+                delay(NAV_RENEW_MS)
+                if (socketRef.get() == null) continue
+                if (!navEnabledProvider()) continue
+                val current = NavStateRepository.state.value
+                if (current.active) {
+                    enqueue(buildNavFrame(current).toString())
+                }
+            }
+        }
         NavStateRepository.state.collect { raw ->
             val effective = if (navEnabledProvider()) raw else NavState()
             if (effective == lastSent) return@collect
@@ -449,6 +462,7 @@ class BridgeClient(
         private const val TICK_MS = 33L
         private const val HEARTBEAT_CHECK_MS = 1_000L
         private const val HEARTBEAT_IDLE_MS = 5_000L
+        private const val NAV_RENEW_MS = 5_000L
         private const val CONNECT_TIMEOUT_MS = 3_000
         private const val NO_HOST_POLL_MS = 2_000L
         // Connection-refused on the local AP fails instantly, so fast retries

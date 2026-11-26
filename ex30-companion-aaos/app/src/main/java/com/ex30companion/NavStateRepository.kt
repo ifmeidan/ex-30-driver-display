@@ -78,26 +78,39 @@ object NavNotificationParser {
         "sixth" to 6,
     )
 
+    private val ETA_SUMMARY_REGEX = Regex(
+        """\b(?:\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|dk|dakika|saat)|eta|remaining|kalan)\b|\b\d{1,2}:\d{2}\b""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private val PURE_DISTANCE_REGEX = Regex(
+        """^\s*\d+(?:[.,]\d+)?\s*(?:km|m|mi|ft|yd)\s*$""",
+        RegexOption.IGNORE_CASE,
+    )
+
     fun parse(
         title: String?,
         text: String?,
         bigText: String? = null,
+        iconHint: String? = null,
     ): NavState {
         val cleanTitle = cleanSpace(title)
         val cleanText = cleanSpace(text)
         val cleanBig = cleanSpace(bigText)
+        val cleanHint = cleanSpace(iconHint)
         val body = if (cleanBig.length > cleanText.length && cleanBig.contains(cleanText, ignoreCase = true)) {
             cleanBig
         } else {
             cleanText.ifEmpty { cleanBig }
         }
 
-        if (cleanTitle.isEmpty() && body.isEmpty()) {
+        if (cleanTitle.isEmpty() && body.isEmpty() && cleanHint.isEmpty()) {
             return NavState()
         }
 
-        val distance = extractDistance(cleanTitle).ifEmpty { extractDistance(body) }
-        val combinedRaw = listOf(cleanTitle, body).filter { it.isNotEmpty() }.joinToString(" ")
+        // Only accept distance from a verified next-turn cue (never from an ETA / total-route summary).
+        val distance = extractVerifiedTurnDistance(cleanTitle, body)
+        val combinedRaw = listOf(cleanHint, cleanTitle, body).filter { it.isNotEmpty() }.joinToString(" ")
         val norm = normalizeForMatch(combinedRaw)
 
         val exitNumber = extractExitNumber(norm)
@@ -114,6 +127,22 @@ object NavNotificationParser {
             distance = distance,
             exitNumber = exitNumber,
         )
+    }
+
+    private fun extractVerifiedTurnDistance(title: String, body: String): String {
+        if (title.isNotEmpty() && !ETA_SUMMARY_REGEX.containsMatchIn(title)) {
+            val fromTitle = extractDistance(title)
+            if (fromTitle.isNotEmpty()) return fromTitle
+        }
+        if (body.isNotEmpty() && !ETA_SUMMARY_REGEX.containsMatchIn(body)) {
+            // Accept body distance only when it's a standalone turn-distance token
+            // or there is no separate title line.
+            if (title.isEmpty() || PURE_DISTANCE_REGEX.matches(body)) {
+                val fromBody = extractDistance(body)
+                if (fromBody.isNotEmpty()) return fromBody
+            }
+        }
+        return ""
     }
 
     private fun cleanSpace(raw: String?): String =
@@ -172,6 +201,7 @@ object NavNotificationParser {
         if (hasAny("düz", "devam", "ileri", "straight", "continue", "head ", "keep going")) {
             return "straight" to true
         }
-        return "straight" to false
+        // Unknown direction: return "none" so the display suppresses the arrow.
+        return "none" to false
     }
 }

@@ -120,7 +120,8 @@ class NavNotificationListenerService : NotificationListenerService() {
         var bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
         val ticker = notification.tickerText?.toString()
 
-        val rvStrings = extractRemoteViewsTexts(notification).filterNot {
+        val rvData = extractRemoteViewsData(notification)
+        val rvStrings = rvData.texts.filterNot {
             it.lowercase(Locale("tr", "TR")).trim() in ACTION_LABELS
         }
         if (rvStrings.isNotEmpty()) {
@@ -136,34 +137,46 @@ class NavNotificationListenerService : NotificationListenerService() {
             title = title,
             text = text,
             bigText = bigText ?: ticker,
+            iconHint = rvData.descriptions.joinToString(" "),
         )
     }
 
+    private data class RemoteViewsData(
+        val texts: List<String>,
+        val descriptions: List<String>,
+    )
+
     @Suppress("DEPRECATION")
-    private fun extractRemoteViewsTexts(n: Notification): List<String> {
+    private fun extractRemoteViewsData(n: Notification): RemoteViewsData {
         val candidates = listOfNotNull(n.bigContentView, n.contentView, n.headsUpContentView)
-        if (candidates.isEmpty()) return emptyList()
-        val out = LinkedHashSet<String>()
+        if (candidates.isEmpty()) return RemoteViewsData(emptyList(), emptyList())
+        val texts = LinkedHashSet<String>()
+        val descs = LinkedHashSet<String>()
         val parent = FrameLayout(applicationContext)
         for (rv in candidates) {
             try {
                 val inflated = rv.apply(applicationContext, parent)
-                collectTextViews(inflated, out)
+                collectViews(inflated, texts, descs)
             } catch (_: Throwable) {
             }
         }
-        return out.toList()
+        return RemoteViewsData(texts.toList(), descs.toList())
     }
 
-    private fun collectTextViews(v: View?, out: MutableSet<String>) {
+    private fun collectViews(v: View?, texts: MutableSet<String>, descs: MutableSet<String>) {
         if (v == null || v.visibility == View.GONE) return
+        v.contentDescription?.toString()?.replace(Regex("""\s+"""), " ")?.trim()?.let { desc ->
+            if (desc.isNotEmpty() && desc.lowercase(Locale("tr", "TR")) !in ACTION_LABELS) {
+                descs.add(desc)
+            }
+        }
         if (v is TextView) {
             val s = v.text?.toString()?.replace(Regex("""\s+"""), " ")?.trim().orEmpty()
-            if (s.isNotEmpty()) out.add(s)
+            if (s.isNotEmpty()) texts.add(s)
         }
         if (v is ViewGroup) {
             for (i in 0 until v.childCount) {
-                collectTextViews(v.getChildAt(i), out)
+                collectViews(v.getChildAt(i), texts, descs)
             }
         }
     }

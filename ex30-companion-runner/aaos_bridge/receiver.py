@@ -102,6 +102,7 @@ class AaosBridgeReceiver:
         pack_capacity_wh: float = 64000.0,
         clock_syncer: Optional[ClockSyncer] = None,
         nav_enabled: bool = False,
+        nav_stale_after_s: Optional[float] = None,
     ) -> None:
         self._shared = shared
         self._host = host
@@ -111,6 +112,8 @@ class AaosBridgeReceiver:
         self._pack_capacity_wh = pack_capacity_wh
         self._clock_syncer = clock_syncer if clock_syncer is not None else ClockSyncer()
         self._nav_enabled = nav_enabled
+        self._nav_stale_after_s = stale_after_s if nav_stale_after_s is None else nav_stale_after_s
+        self._nav_last_ts: float = 0.0
         # Receiver-local energy integration state for battery_power_mw.
         # Resets when the receiver instance is constructed; not persisted
         # across reboots — same scope as the OBD2 poller's counterpart.
@@ -231,7 +234,13 @@ class AaosBridgeReceiver:
             logger.warning("non-object frame, dropping")
             return
         kind = msg.get("type")
-        if kind not in ("hello", "state", "nav", "heartbeat", "goodbye"):
+        if kind == "nav":
+            # Nav frames are strictly isolated from vehicle telemetry:
+            # never touch clock_syncer, jsonl logging, or aaos_stale/last_msg_ts.
+            if self._nav_enabled:
+                self._apply_nav(msg)
+            return
+        if kind not in ("hello", "state", "heartbeat", "goodbye"):
             logger.warning("unknown frame type: %r", kind)
             return
         # Sync the wall-clock from `ts` BEFORE _mark_fresh() so the freshness
@@ -239,16 +248,11 @@ class AaosBridgeReceiver:
         # Otherwise a 9h jump forward would make the very next stale-loop tick
         # mark the source stale immediately.
         self._clock_syncer.consider(msg.get("ts"))
-        # Privacy invariant: never write navigation frames to the Pi jsonl log.
-        if kind != "nav":
-            self._log_jsonl(msg)
+        self._log_jsonl(msg)
         self._mark_fresh()
 
         if kind == "state":
             self._apply_state(msg)
-        elif kind == "nav":
-            if self._nav_enabled:
-                self._apply_nav(msg)
         elif kind == "hello":
             subs = msg.get("fields_subscribed")
             logger.info(
@@ -272,7 +276,7 @@ class AaosBridgeReceiver:
             return
         maneuver = nav.get("maneuver")
         if not isinstance(maneuver, str) or maneuver not in NAV_MANEUVERS:
-            maneuver = "straight"
+            maneuver = "none"
         raw_dist = nav.get("distance")
         distance = ""
         if isinstance(raw_dist, str):
@@ -281,6 +285,7 @@ class AaosBridgeReceiver:
                 distance = cand
         raw_exit = nav.get("exit", 0)
         exit_num = raw_exit if isinstance(raw_exit, int) and not isinstance(raw_exit, bool) and 1 <= raw_exit <= 9 else 0
+        self._nav_last_ts = time.monotonic()
         self._shared.update(
             nav_active=True,
             nav_maneuver=maneuver,
@@ -289,6 +294,7 @@ class AaosBridgeReceiver:
         )
 
     def _clear_nav(self) -> None:
+        self._nav_last_ts = 0.0
         self._shared.update(
             nav_active=False,
             nav_maneuver="none",
@@ -414,20 +420,17 @@ class AaosBridgeReceiver:
     # --- staleness watchdog -----------------------------------------------
 
     def _stale_loop(self) -> None:
-        while not self._stop.wait(1.0):
+        while not self._stop.wait(0.2):
             last = self._shared.get("aaos_last_msg_ts")
-            if not last:
-                continue
-            if time.time() - last > self._stale_after_s:
+            if last and time.time() - last > self._stale_after_s:
                 if not self._shared.get("aaos_stale"):
-                    self._shared.update(
-                        aaos_stale=True,
-                        nav_active=False,
-                        nav_maneuver="none",
-                        nav_distance="",
-                        nav_exit=0,
-                    )
+                    self._shared.update(aaos_stale=True)
+                    self._clear_nav()
                     logger.info("AAOS source marked stale (>%.0fs idle)", self._stale_after_s)
+            if self._nav_last_ts > 0.0 and (time.monotonic() - self._nav_last_ts) > self._nav_stale_after_s:
+                if self._shared.get("nav_active"):
+                    self._clear_nav()
+                    logger.info("AAOS nav cue timed out (>%.1fs without nav renewal)", self._nav_stale_after_s)
 
 
 # --- standalone entry point (debug / dev) --------------------------------
