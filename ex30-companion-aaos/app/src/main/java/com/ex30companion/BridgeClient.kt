@@ -39,10 +39,14 @@ class BridgeClient(
     private val port: Int = 7878,
     private val appVersion: String = BuildConfig.VERSION_NAME,
     private val parkedState: kotlinx.coroutines.flow.StateFlow<ParkedModeMonitor.State>? = null,
+    private val navEnabledProvider: () -> Boolean = { false },
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sendQueue = Channel<String>(capacity = QUEUE_CAPACITY)
+    // Ordered, generation-checked publisher for `type: "nav"` frames so
+    // renewals, changes, and reconnect seeds never reorder an older cue after a newer one.
+    private val navPublisher = NavFramePublisher()
     private val pendingChanges = mutableMapOf<String, Any>()
     private val pendingLock = Any()
     // Serializes direct writes (hello / goodbye / synthetic parked frame)
@@ -85,6 +89,7 @@ class BridgeClient(
         started = true
         registerWifiCallback()
         scope.launch { observeRepository() }
+        scope.launch { observeNavigation() }
         scope.launch { runCoalescer() }
         scope.launch { runHeartbeat() }
         scope.launch { runConnectionLoop() }
@@ -171,6 +176,7 @@ class BridgeClient(
 
     private fun drainQueue() {
         while (sendQueue.tryReceive().isSuccess) { /* drop stale frames */ }
+        navPublisher.clearPending()
         synchronized(pendingLock) { pendingChanges.clear() }
     }
 
@@ -189,6 +195,51 @@ class BridgeClient(
                     pendingChanges[wire.field] = wire.value
                 }
             }
+        }
+    }
+
+    /**
+     * Emits standalone `{"type": "nav", ...}` frames via [navPublisher],
+     * serializing renewals, live updates, and opt-out clears with a generation
+     * check at staging time.
+     */
+    private suspend fun observeNavigation() {
+        var wasOptedIn = false
+        scope.launch {
+            while (isActive) {
+                delay(NAV_RENEW_MS)
+                val optedIn = navEnabledProvider() && NavNotificationListenerService.isPermissionGranted(context)
+                if (!optedIn) {
+                    if (wasOptedIn || NavStateRepository.state.value.active) {
+                        wasOptedIn = false
+                        NavNotificationSelector.reset()
+                        val cleared = NavStateRepository.clear()
+                        if (socketRef.get() != null) {
+                            navPublisher.stageOptOutClear(cleared)
+                        }
+                    }
+                    continue
+                }
+                wasOptedIn = true
+                if (!NavStateRepository.revalidate()) continue
+                val snapshot = NavStateRepository.currentVersioned()
+                if (socketRef.get() != null) {
+                    navPublisher.stageRenewal(
+                        versioned = snapshot,
+                        latestRepoSeq = NavStateRepository.currentSeq(),
+                        optedIn = true,
+                    )
+                }
+            }
+        }
+        NavStateRepository.versionedState.collect { versioned ->
+            val optedIn = navEnabledProvider() && NavNotificationListenerService.isPermissionGranted(context)
+            if (socketRef.get() != null && (optedIn || wasOptedIn || !versioned.state.active)) {
+                if (optedIn || wasOptedIn) {
+                    navPublisher.stageChange(versioned, optedIn)
+                }
+            }
+            wasOptedIn = optedIn
         }
     }
 
@@ -358,11 +409,39 @@ class BridgeClient(
                 pendingChanges[wire.field] = wire.value
             }
         }
+        // Discard any pre-connect nav frame and stage only the single latest
+        // validated state after `hello` (including an inactive state when no route is active).
+        navPublisher.clearPending()
+        if (navEnabledProvider()) {
+            val permitted = NavNotificationListenerService.isPermissionGranted(context)
+            if (!permitted) {
+                NavNotificationSelector.reset()
+                NavStateRepository.clear()
+            } else {
+                NavStateRepository.revalidate()
+            }
+            val current = NavStateRepository.currentVersioned()
+            navPublisher.stageReconnectSeed(
+                versioned = if (permitted) current else VersionedNavState(current.seq, NavState()),
+                latestRepoSeq = NavStateRepository.currentSeq(),
+                optedIn = true,
+            )
+        }
     }
 
     private suspend fun runWriter(socket: Socket) = withContext(Dispatchers.IO) {
         val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
         while (true) {
+            val navLine = navPublisher.pollLine()
+            if (navLine != null) {
+                if (socketRef.get() !== socket) return@withContext
+                synchronized(writeLock) {
+                    writer.write(navLine)
+                    writer.write("\n")
+                    writer.flush()
+                }
+                continue
+            }
             // Poll with a timeout instead of blocking forever on the channel:
             // when parked mode (or a network drop) swaps the socket out from
             // under us, this loop must end so the connection loop can get
@@ -412,6 +491,7 @@ class BridgeClient(
         private const val TICK_MS = 33L
         private const val HEARTBEAT_CHECK_MS = 1_000L
         private const val HEARTBEAT_IDLE_MS = 5_000L
+        private const val NAV_RENEW_MS = 5_000L
         private const val CONNECT_TIMEOUT_MS = 3_000
         private const val NO_HOST_POLL_MS = 2_000L
         // Connection-refused on the local AP fails instantly, so fast retries

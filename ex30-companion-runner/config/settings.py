@@ -66,3 +66,7 @@ class Settings:
     # convert raw Wh from VHAL into a display % SoC. Override for the
     # Standard Range (~51 kWh) or any future capacity.
     pack_capacity_wh: float = 64000.0
+    # Experimental opt-in handling for AAOS `nav` frames (maneuver + distance).
+    aaos_nav_enabled: bool = False
+    # Default-off receiver diagnostic log for accepted AAOS nav state transitions.
+    aaos_nav_diag: bool = False

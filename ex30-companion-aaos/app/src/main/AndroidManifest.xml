@@ -103,6 +103,17 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <!-- Experimental, opt-in notification listener for turn-by-turn
+             maneuver + distance only (see BridgeSettings.navEnabled). -->
+        <service
+            android:name=".NavNotificationListenerService"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <!-- Templated Car App Library service whose sole purpose is to declare
              the IOT car-app category Play requires for the Automotive listing.
              The real UI is MainActivity (the LAUNCHER activity above). -->

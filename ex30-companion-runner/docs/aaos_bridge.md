@@ -125,6 +125,36 @@ python -m aaos_bridge.receiver --port 7878 --log-dir logs
 Prints a snapshot summary every 5s. Useful when bench-testing the
 Android sender without the full UI.
 
+### Experimental turn-by-turn navigation (`nav` frames)
+
+Off by default on both ends. To test in a parked car or on the bench:
+
+1. **AAOS app opt-in & Notification Access:** Tap `Nav: OFF` in `EX30 Companion`
+   (`MainActivity`). If notification listener access is not yet granted, the app
+   opens AAOS Notification Access settings and shows `Nav: Grant`; once granted,
+   it shows `Nav: ON` (tap when `ON` or long-press at any time to reset to
+   `Nav: OFF`).
+2. **Pi receiver opt-in & diagnostic logging:**
+   - Pass `--aaos-nav` to `main.py` (or `python -m aaos_bridge.receiver --aaos-nav`)
+     to enable processing of `type: "nav"` frames.
+   - Pass `--aaos-nav-diag` (default off) to log accepted state transitions
+     (`nav state: active=True maneuver=... distance=... arrival=... exit=...`)
+     and clear reasons (`nav cleared: reason=...`) to the application log without
+     logging any raw notification text, street names, or addresses.
+   - `scripts/launch.sh` forwards all CLI arguments (`exec python main.py "$@"`),
+     so on an installed Pi you can opt in under systemd by appending `--aaos-nav`
+     (and optionally `--aaos-nav-diag`) to `ExecStart` in
+     `/etc/systemd/system/driver-display.service` (e.g.
+     `ExecStart=/usr/bin/cage -- /path/to/scripts/launch.sh --aaos-nav`).
+3. **Isolation & privacy:**
+   - Only ongoing navigation guidance notifications from Google Maps
+     (`com.google.android.apps.maps`) are read.
+   - `nav` frames never write to `logs/aaos_bridge_YYYYMMDD.jsonl` or
+     `DriveLogger` CSVs, never trigger wall-clock sync, and never refresh
+     vehicle telemetry staleness (`aaos_stale`).
+   - Active cues are revalidated against live `activeNotifications` every 5s on
+     AAOS and expire independently after 15s on the Pi if renewals stop.
+
 ## Wall-clock sync
 
 The Pi has no RTC battery and is offline outside the car, so its system

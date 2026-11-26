@@ -3,7 +3,9 @@ package com.ex30companion
 import android.car.VehiclePropertyIds
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -42,6 +44,17 @@ class MainActivity : AppCompatActivity() {
             if (SyntheticLoadDriver.isRunning()) SyntheticLoadDriver.stop()
             else SyntheticLoadDriver.start()
             renderSoakStatus()
+        }
+        renderNavStatus()
+        binding.navToggle.setOnClickListener {
+            onNavToggleClicked()
+        }
+        binding.navToggle.setOnLongClickListener {
+            BridgeSettings.setNavEnabled(this, false)
+            NavNotificationSelector.reset()
+            NavStateRepository.clear()
+            renderNavStatus()
+            true
         }
 
         val missing = PropertyCatalog.dangerousPermissions.filter {
@@ -94,7 +107,66 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
+    override fun onResume() {
+        super.onResume()
+        NavNotificationListenerService.ensureRebind(this)
+        renderNavStatus()
+    }
+
     private fun renderSoakStatus() {
         binding.soakToggle.text = if (SyntheticLoadDriver.isRunning()) "Soak: ON" else "Soak"
+    }
+
+    private fun renderNavStatus() {
+        val enabled = BridgeSettings.navEnabled(this)
+        val granted = NavNotificationListenerService.isPermissionGranted(this)
+        binding.navToggle.text = when {
+            !enabled -> "Nav: OFF"
+            !granted -> "Nav: Grant"
+            else -> "Nav: ON"
+        }
+    }
+
+    private fun onNavToggleClicked() {
+        val enabled = BridgeSettings.navEnabled(this)
+        val granted = NavNotificationListenerService.isPermissionGranted(this)
+        when {
+            !enabled -> {
+                BridgeSettings.setNavEnabled(this, true)
+                if (!granted) {
+                    openNotificationListenerSettings()
+                } else {
+                    NavNotificationListenerService.ensureRebind(this)
+                    NavStateRepository.revalidate()
+                }
+            }
+            !granted -> {
+                // Tapping while in "Nav: Grant" opens settings; long-press or
+                // tapping again after granting flips to ON, or turns OFF if already granted.
+                openNotificationListenerSettings()
+            }
+            else -> {
+                BridgeSettings.setNavEnabled(this, false)
+                NavNotificationSelector.reset()
+                NavStateRepository.clear()
+            }
+        }
+        renderNavStatus()
+    }
+
+    private fun openNotificationListenerSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        } catch (_: Throwable) {
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", packageName, null),
+                    ),
+                )
+            } catch (_: Throwable) {
+            }
+        }
     }
 }

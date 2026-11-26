@@ -74,6 +74,13 @@ class VehicleData:
                                            # STATIC — populated once on connect,
                                            # used by receiver for soc% conversion.
 
+    # ── Experimental opt-in AAOS navigation (`type: "nav"`, separate from telemetry) ──
+    nav_active: bool = False
+    nav_maneuver: str = "none"             # closed enum (turn_left, turn_right, ...)
+    nav_distance: str = ""                 # numeric + unit only (e.g. "300 m")
+    nav_arrival: str = "none"              # closed enum (destination, destination_left, destination_right, none)
+    nav_exit: int = 0                      # roundabout exit 1..9, or 0
+
 
 class SharedVehicleData:
     """Thread-safe wrapper around VehicleData.

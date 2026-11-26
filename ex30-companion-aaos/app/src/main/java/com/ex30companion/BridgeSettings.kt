@@ -13,6 +13,7 @@ object BridgeSettings {
 
     private const val PREFS = "bridge"
     private const val KEY_HOST = "pi_host"
+    private const val KEY_NAV_ENABLED = "nav_enabled"
 
     fun host(context: Context): String? =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -23,6 +24,21 @@ object BridgeSettings {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_HOST, host.trim())
+            .apply()
+    }
+
+    /**
+     * Experimental opt-in toggle for turn-by-turn maneuver + distance
+     * forwarding. Off by default.
+     */
+    fun navEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NAV_ENABLED, false)
+
+    fun setNavEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_NAV_ENABLED, enabled)
             .apply()
     }
 }
