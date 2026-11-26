@@ -4,6 +4,18 @@ Each entry covers one commit on `main` since the first closed-test snapshot. Und
 
 To check your installed Companion version, open **Settings → Apps → EX30 Companion** on the head unit.
 
+## 27 November 2026 · Version history published on GitHub
+
+[Documentation change #10](https://github.com/ifmeidan/ex-30-driver-display/pull/10)
+
+### AAOS · Companion 1.0.7 (build 21) · targets Android 15
+
+The app README now links to the closed-test history. This documentation update keeps the same Companion build.
+
+### Raspberry Pi runner
+
+Pi owners can now see from the project README which updates require new runner software. This entry changes documentation only.
+
 ## 27 November 2026 · Reconnect to the display after a restart
 
 [Commit 7c2a998](https://github.com/ifmeidan/ex-30-driver-display/commit/7c2a9988320ae1f1d6368720279ed545daabe902)
