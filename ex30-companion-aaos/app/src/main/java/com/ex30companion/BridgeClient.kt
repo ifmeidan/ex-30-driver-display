@@ -44,9 +44,9 @@ class BridgeClient(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sendQueue = Channel<String>(capacity = QUEUE_CAPACITY)
-    // Conflated single-slot holder for `type: "nav"` frames so offline/stalled
-    // periods never accumulate a backlog of stale turns (`old left -> old right -> clear`).
-    private val pendingNavFrame = AtomicReference<String?>(null)
+    // Ordered, generation-checked publisher for `type: "nav"` frames so
+    // renewals, changes, and reconnect seeds never reorder an older cue after a newer one.
+    private val navPublisher = NavFramePublisher()
     private val pendingChanges = mutableMapOf<String, Any>()
     private val pendingLock = Any()
     // Serializes direct writes (hello / goodbye / synthetic parked frame)
@@ -176,7 +176,7 @@ class BridgeClient(
 
     private fun drainQueue() {
         while (sendQueue.tryReceive().isSuccess) { /* drop stale frames */ }
-        pendingNavFrame.set(null)
+        navPublisher.clearPending()
         synchronized(pendingLock) { pendingChanges.clear() }
     }
 
@@ -199,12 +199,11 @@ class BridgeClient(
     }
 
     /**
-     * Emits standalone `{"type": "nav", ...}` frames via a single conflated
-     * slot ([pendingNavFrame]), separate from vehicle `state` telemetry and
-     * gated by the in-app opt-in toggle + notification listener permission.
+     * Emits standalone `{"type": "nav", ...}` frames via [navPublisher],
+     * serializing renewals, live updates, and opt-out clears with a generation
+     * check at staging time.
      */
     private suspend fun observeNavigation() {
-        var lastSent: NavState? = null
         var wasOptedIn = false
         scope.launch {
             while (isActive) {
@@ -214,53 +213,34 @@ class BridgeClient(
                     if (wasOptedIn || NavStateRepository.state.value.active) {
                         wasOptedIn = false
                         NavNotificationSelector.reset()
-                        NavStateRepository.clear()
-                        lastSent = NavState()
+                        val cleared = NavStateRepository.clear()
                         if (socketRef.get() != null) {
-                            pendingNavFrame.set(buildNavFrame(NavState()).toString())
+                            navPublisher.stageOptOutClear(cleared)
                         }
                     }
                     continue
                 }
                 wasOptedIn = true
-                // Revalidate against live activeNotifications before renewing so a
-                // missed removal callback or revoked permission cannot keep a stale cue alive.
                 if (!NavStateRepository.revalidate()) continue
-                val current = NavStateRepository.state.value
-                lastSent = current
-                if (current.active && socketRef.get() != null) {
-                    pendingNavFrame.set(buildNavFrame(current).toString())
+                val snapshot = NavStateRepository.currentVersioned()
+                if (socketRef.get() != null) {
+                    navPublisher.stageRenewal(
+                        versioned = snapshot,
+                        latestRepoSeq = NavStateRepository.currentSeq(),
+                        optedIn = true,
+                    )
                 }
             }
         }
-        NavStateRepository.state.collect { raw ->
+        NavStateRepository.versionedState.collect { versioned ->
             val optedIn = navEnabledProvider() && NavNotificationListenerService.isPermissionGranted(context)
-            val effective = if (optedIn) raw else NavState()
-            if (effective == lastSent) return@collect
-            lastSent = effective
-            if (socketRef.get() != null && (optedIn || wasOptedIn || !effective.active)) {
+            if (socketRef.get() != null && (optedIn || wasOptedIn || !versioned.state.active)) {
                 if (optedIn || wasOptedIn) {
-                    pendingNavFrame.set(buildNavFrame(effective).toString())
+                    navPublisher.stageChange(versioned, optedIn)
                 }
             }
             wasOptedIn = optedIn
         }
-    }
-
-    private fun buildNavFrame(nav: NavState): JSONObject = JSONObject().apply {
-        put("type", "nav")
-        put("ts", System.currentTimeMillis())
-        put("src", "aaos")
-        put(
-            "nav",
-            JSONObject().apply {
-                put("active", nav.active)
-                put("maneuver", if (nav.active) nav.maneuver else "none")
-                put("distance", if (nav.active) nav.distance else "")
-                put("arrival", if (nav.active) nav.arrival else "none")
-                put("exit", if (nav.active) nav.exitNumber else 0)
-            },
-        )
     }
 
     // --- Coalescer ----------------------------------------------------------
@@ -429,9 +409,9 @@ class BridgeClient(
                 pendingChanges[wire.field] = wire.value
             }
         }
-        // Discard any pre-connect nav frame and send only the single latest
+        // Discard any pre-connect nav frame and stage only the single latest
         // validated state after `hello` (including an inactive state when no route is active).
-        pendingNavFrame.set(null)
+        navPublisher.clearPending()
         if (navEnabledProvider()) {
             val permitted = NavNotificationListenerService.isPermissionGranted(context)
             if (!permitted) {
@@ -440,15 +420,19 @@ class BridgeClient(
             } else {
                 NavStateRepository.revalidate()
             }
-            val current = if (permitted) NavStateRepository.state.value else NavState()
-            pendingNavFrame.set(buildNavFrame(current).toString())
+            val current = NavStateRepository.currentVersioned()
+            navPublisher.stageReconnectSeed(
+                versioned = if (permitted) current else VersionedNavState(current.seq, NavState()),
+                latestRepoSeq = NavStateRepository.currentSeq(),
+                optedIn = true,
+            )
         }
     }
 
     private suspend fun runWriter(socket: Socket) = withContext(Dispatchers.IO) {
         val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
         while (true) {
-            val navLine = pendingNavFrame.getAndSet(null)
+            val navLine = navPublisher.pollLine()
             if (navLine != null) {
                 if (socketRef.get() !== socket) return@withContext
                 synchronized(writeLock) {

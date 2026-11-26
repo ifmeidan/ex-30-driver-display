@@ -132,7 +132,7 @@ class AaosBridgeReceiver:
         self._stop = threading.Event()
         self._serve_thread: Optional[threading.Thread] = None
         self._stale_thread: Optional[threading.Thread] = None
-        self._conn_lock = threading.Lock()
+        self._conn_lock = threading.RLock()
         self._active: Optional[socket.socket] = None
         os.makedirs(self._log_dir, exist_ok=True)
 
@@ -220,7 +220,7 @@ class AaosBridgeReceiver:
                     while raw and not raw.endswith(b"\n"):
                         raw = stream.readline(MAX_LINE_BYTES + 1)
                     continue
-                self._process_line(raw.rstrip(b"\r\n"))
+                self._process_line(raw.rstrip(b"\r\n"), conn=conn)
         except OSError as exc:
             logger.warning("connection error from %s: %s", addr, exc)
         finally:
@@ -236,7 +236,7 @@ class AaosBridgeReceiver:
 
     # --- frame handling ---------------------------------------------------
 
-    def _process_line(self, raw: bytes) -> None:
+    def _process_line(self, raw: bytes, conn: Optional[socket.socket] = None) -> None:
         if not raw:
             return
         try:
@@ -252,101 +252,110 @@ class AaosBridgeReceiver:
             # Nav frames are strictly isolated from vehicle telemetry:
             # never touch clock_syncer, jsonl logging, or aaos_stale/last_msg_ts.
             if self._nav_enabled:
-                self._apply_nav(msg)
+                self._apply_nav(msg, conn=conn)
             return
         if kind not in ("hello", "state", "heartbeat", "goodbye"):
             logger.warning("unknown frame type: %r", kind)
             return
-        # Sync the wall-clock from `ts` BEFORE _mark_fresh() so the freshness
-        # timestamp is recorded against the (possibly just-corrected) clock.
-        # Otherwise a 9h jump forward would make the very next stale-loop tick
-        # mark the source stale immediately.
-        self._clock_syncer.consider(msg.get("ts"))
-        self._log_jsonl(msg)
-        self._mark_fresh()
+        with self._conn_lock:
+            if conn is not None and self._active is not conn:
+                return
+            # Sync the wall-clock from `ts` BEFORE _mark_fresh() so the freshness
+            # timestamp is recorded against the (possibly just-corrected) clock.
+            # Otherwise a 9h jump forward would make the very next stale-loop tick
+            # mark the source stale immediately.
+            self._clock_syncer.consider(msg.get("ts"))
+            self._log_jsonl(msg)
+            self._mark_fresh()
 
-        if kind == "state":
-            self._apply_state(msg)
-        elif kind == "hello":
-            self._clear_nav(reason="hello")
-            subs = msg.get("fields_subscribed")
-            logger.info(
-                "hello v=%s schema=%s fields=%d",
-                msg.get("app_version"),
-                msg.get("schema_version"),
-                len(subs) if isinstance(subs, list) else -1,
-            )
-        elif kind == "goodbye":
-            self._clear_nav(reason=f"goodbye:{msg.get('reason', 'unknown')}")
-            logger.info("goodbye reason=%s", msg.get("reason"))
-        # heartbeat: nothing to do beyond freshness, already handled.
+            if kind == "state":
+                self._apply_state(msg)
+            elif kind == "hello":
+                self._clear_nav(reason="hello", conn=conn)
+                subs = msg.get("fields_subscribed")
+                logger.info(
+                    "hello v=%s schema=%s fields=%d",
+                    msg.get("app_version"),
+                    msg.get("schema_version"),
+                    len(subs) if isinstance(subs, list) else -1,
+                )
+            elif kind == "goodbye":
+                self._clear_nav(reason=f"goodbye:{msg.get('reason', 'unknown')}", conn=conn)
+                logger.info("goodbye reason=%s", msg.get("reason"))
+            # heartbeat: nothing to do beyond freshness, already handled.
 
-    def _apply_nav(self, msg: dict) -> None:
+    def _apply_nav(self, msg: dict, conn: Optional[socket.socket] = None) -> None:
         nav = msg.get("nav")
         if not isinstance(nav, dict):
             return
-        active = bool(nav.get("active", False))
-        if not active:
-            self._clear_nav(reason="nav_inactive")
-            return
-        maneuver = nav.get("maneuver")
-        if not isinstance(maneuver, str) or maneuver not in NAV_MANEUVERS:
-            maneuver = "none"
-        arrival = nav.get("arrival", "none")
-        if not isinstance(arrival, str) or arrival not in NAV_ARRIVALS:
-            arrival = "none"
-        raw_dist = nav.get("distance")
-        distance = ""
-        if isinstance(raw_dist, str):
-            cand = raw_dist.strip()[:16]
-            if NAV_DISTANCE_RE.match(cand):
-                distance = cand
-        raw_exit = nav.get("exit", 0)
-        exit_num = (
-            raw_exit
-            if maneuver == "roundabout"
-            and isinstance(raw_exit, int)
-            and not isinstance(raw_exit, bool)
-            and 1 <= raw_exit <= 9
-            else 0
-        )
-        prev_tuple = (
-            self._shared.get("nav_active"),
-            self._shared.get("nav_maneuver"),
-            self._shared.get("nav_distance"),
-            self._shared.get("nav_arrival"),
-            self._shared.get("nav_exit"),
-        )
-        new_tuple = (True, maneuver, distance, arrival, exit_num)
-        self._nav_last_ts = time.monotonic()
-        self._shared.update(
-            nav_active=True,
-            nav_maneuver=maneuver,
-            nav_distance=distance,
-            nav_arrival=arrival,
-            nav_exit=exit_num,
-        )
-        if self._nav_diag and new_tuple != prev_tuple:
-            logger.info(
-                "nav state: active=True maneuver=%s distance=%r arrival=%s exit=%d",
-                maneuver,
-                distance,
-                arrival,
-                exit_num,
+        with self._conn_lock:
+            if conn is not None and self._active is not conn:
+                return
+            active = bool(nav.get("active", False))
+            if not active:
+                self._clear_nav(reason="nav_inactive", conn=conn)
+                return
+            maneuver = nav.get("maneuver")
+            if not isinstance(maneuver, str) or maneuver not in NAV_MANEUVERS:
+                maneuver = "none"
+            arrival = nav.get("arrival", "none")
+            if not isinstance(arrival, str) or arrival not in NAV_ARRIVALS:
+                arrival = "none"
+            raw_dist = nav.get("distance")
+            distance = ""
+            if isinstance(raw_dist, str):
+                cand = raw_dist.strip()[:16]
+                if NAV_DISTANCE_RE.match(cand):
+                    distance = cand
+            raw_exit = nav.get("exit", 0)
+            exit_num = (
+                raw_exit
+                if maneuver == "roundabout"
+                and isinstance(raw_exit, int)
+                and not isinstance(raw_exit, bool)
+                and 1 <= raw_exit <= 9
+                else 0
             )
+            prev_tuple = (
+                self._shared.get("nav_active"),
+                self._shared.get("nav_maneuver"),
+                self._shared.get("nav_distance"),
+                self._shared.get("nav_arrival"),
+                self._shared.get("nav_exit"),
+            )
+            new_tuple = (True, maneuver, distance, arrival, exit_num)
+            self._nav_last_ts = time.monotonic()
+            self._shared.update(
+                nav_active=True,
+                nav_maneuver=maneuver,
+                nav_distance=distance,
+                nav_arrival=arrival,
+                nav_exit=exit_num,
+            )
+            if self._nav_diag and new_tuple != prev_tuple:
+                logger.info(
+                    "nav state: active=True maneuver=%s distance=%r arrival=%s exit=%d",
+                    maneuver,
+                    distance,
+                    arrival,
+                    exit_num,
+                )
 
-    def _clear_nav(self, reason: str = "cleared") -> None:
-        was_active = bool(self._shared.get("nav_active"))
-        self._nav_last_ts = 0.0
-        self._shared.update(
-            nav_active=False,
-            nav_maneuver="none",
-            nav_distance="",
-            nav_arrival="none",
-            nav_exit=0,
-        )
-        if self._nav_diag and was_active:
-            logger.info("nav cleared: reason=%s", reason)
+    def _clear_nav(self, reason: str = "cleared", conn: Optional[socket.socket] = None) -> None:
+        with self._conn_lock:
+            if conn is not None and self._active is not conn:
+                return
+            was_active = bool(self._shared.get("nav_active"))
+            self._nav_last_ts = 0.0
+            self._shared.update(
+                nav_active=False,
+                nav_maneuver="none",
+                nav_distance="",
+                nav_arrival="none",
+                nav_exit=0,
+            )
+            if self._nav_diag and was_active:
+                logger.info("nav cleared: reason=%s", reason)
 
     def _apply_state(self, msg: dict) -> None:
         fields = msg.get("fields")
@@ -467,16 +476,17 @@ class AaosBridgeReceiver:
 
     def _stale_loop(self) -> None:
         while not self._stop.wait(0.2):
-            last = self._shared.get("aaos_last_msg_ts")
-            if last and time.time() - last > self._stale_after_s:
-                if not self._shared.get("aaos_stale"):
-                    self._shared.update(aaos_stale=True)
-                    self._clear_nav(reason="aaos_stale")
-                    logger.info("AAOS source marked stale (>%.0fs idle)", self._stale_after_s)
-            if self._nav_last_ts > 0.0 and (time.monotonic() - self._nav_last_ts) > self._nav_stale_after_s:
-                if self._shared.get("nav_active"):
-                    self._clear_nav(reason="nav_timeout")
-                    logger.info("AAOS nav cue timed out (>%.1fs without nav renewal)", self._nav_stale_after_s)
+            with self._conn_lock:
+                last = self._shared.get("aaos_last_msg_ts")
+                if last and time.time() - last > self._stale_after_s:
+                    if not self._shared.get("aaos_stale"):
+                        self._shared.update(aaos_stale=True)
+                        self._clear_nav(reason="aaos_stale")
+                        logger.info("AAOS source marked stale (>%.0fs idle)", self._stale_after_s)
+                if self._nav_last_ts > 0.0 and (time.monotonic() - self._nav_last_ts) > self._nav_stale_after_s:
+                    if self._shared.get("nav_active"):
+                        self._clear_nav(reason="nav_timeout")
+                        logger.info("AAOS nav cue timed out (>%.1fs without nav renewal)", self._nav_stale_after_s)
 
 
 # --- standalone entry point (debug / dev) --------------------------------

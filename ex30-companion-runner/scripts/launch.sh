@@ -11,4 +11,4 @@ cd "$PROJECT_DIR"
 export QT_QPA_PLATFORM=wayland
 
 source venv/bin/activate
-exec python main.py
+exec python main.py "$@"

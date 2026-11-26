@@ -141,6 +141,11 @@ Off by default on both ends. To test in a parked car or on the bench:
      (`nav state: active=True maneuver=... distance=... arrival=... exit=...`)
      and clear reasons (`nav cleared: reason=...`) to the application log without
      logging any raw notification text, street names, or addresses.
+   - `scripts/launch.sh` forwards all CLI arguments (`exec python main.py "$@"`),
+     so on an installed Pi you can opt in under systemd by appending `--aaos-nav`
+     (and optionally `--aaos-nav-diag`) to `ExecStart` in
+     `/etc/systemd/system/driver-display.service` (e.g.
+     `ExecStart=/usr/bin/cage -- /path/to/scripts/launch.sh --aaos-nav`).
 3. **Isolation & privacy:**
    - Only ongoing navigation guidance notifications from Google Maps
      (`com.google.android.apps.maps`) are read.

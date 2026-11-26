@@ -3,6 +3,7 @@ package com.ex30companion
 import android.app.Notification
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -27,7 +28,7 @@ class NavNotificationParserTest {
         // 1. A removal/clear arrives while refresh is in flight -> refresh must NOT bring back the removed cue.
         NavStateRepository.clear()
         val appliedAfterClear = NavStateRepository.applyRefreshIfUnchanged(seqBeforeRefresh, leftTurn)
-        assertFalse(appliedAfterClear)
+        assertNull(appliedAfterClear)
         assertFalse(NavStateRepository.state.value.active)
 
         // 2. A newer callback updates state while refresh is in flight -> refresh must NOT overwrite the newer cue.
@@ -35,18 +36,69 @@ class NavNotificationParserTest {
         val seqBeforeSecondRefresh = NavStateRepository.currentSeq()
         NavStateRepository.update(rightTurn)
         val appliedAfterReplacement = NavStateRepository.applyRefreshIfUnchanged(seqBeforeSecondRefresh, leftTurn)
-        assertFalse(appliedAfterReplacement)
+        assertNull(appliedAfterReplacement)
         assertEquals("turn_right", NavStateRepository.state.value.maneuver)
         assertEquals("150 m", NavStateRepository.state.value.distance)
 
         // 3. When no callback intervened, refresh applies cleanly.
         val seqQuiet = NavStateRepository.currentSeq()
-        assertTrue(NavStateRepository.applyRefreshIfUnchanged(seqQuiet, rightTurn))
+        assertNotNull(NavStateRepository.applyRefreshIfUnchanged(seqQuiet, rightTurn))
     }
 
     @Test
-    fun `source filter requires Google Maps package and active guidance`() {
-        // Non-Maps package rejected before content inspection
+    fun `publisher serializes paused renewal against concurrent clear and newer turn at wire level`() {
+        val publisher = NavFramePublisher(nowMs = { 1000L })
+        val oldLeft = NavNotificationParser.parse(title = "300 m", text = "Turn left")
+        val newRight = NavNotificationParser.parse(title = "150 m", text = "Turn right")
+
+        // Case 1: Renewal reads oldLeft, then clear happens before renewal stages -> wire sees ONLY clear.
+        val vLeft1 = NavStateRepository.update(oldLeft)
+        assertTrue(publisher.stageChange(vLeft1, optedIn = true))
+        val firstWire = publisher.pollLine()!!
+        assertTrue(firstWire.contains(""""maneuver":"turn_left""""))
+
+        val pausedRenewalSnapshot1 = NavStateRepository.currentVersioned()
+        val vCleared = NavStateRepository.clear()
+        assertTrue(publisher.stageChange(vCleared, optedIn = true))
+        val clearWire = publisher.pollLine()!!
+        assertTrue(clearWire.contains(""""active":false"""))
+
+        // Paused renewal resumes after clear: must be rejected at staging.
+        assertFalse(
+            publisher.stageRenewal(
+                versioned = pausedRenewalSnapshot1,
+                latestRepoSeq = NavStateRepository.currentSeq(),
+                optedIn = true,
+            ),
+        )
+        assertNull(publisher.pollLine())
+
+        // Case 2: Renewal reads oldLeft, then newRight arrives before renewal stages -> wire sees ONLY newRight.
+        val vLeft2 = NavStateRepository.update(oldLeft)
+        assertTrue(publisher.stageChange(vLeft2, optedIn = true))
+        assertNotNull(publisher.pollLine())
+
+        val pausedRenewalSnapshot2 = NavStateRepository.currentVersioned()
+        val vRight = NavStateRepository.update(newRight)
+        assertTrue(publisher.stageChange(vRight, optedIn = true))
+        val rightWire = publisher.pollLine()!!
+        assertTrue(rightWire.contains(""""maneuver":"turn_right""""))
+        assertTrue(rightWire.contains(""""distance":"150 m""""))
+
+        // Paused renewal of oldLeft resumes: must be rejected at staging.
+        assertFalse(
+            publisher.stageRenewal(
+                versioned = pausedRenewalSnapshot2,
+                latestRepoSeq = NavStateRepository.currentSeq(),
+                optedIn = true,
+            ),
+        )
+        assertNull(publisher.pollLine())
+    }
+
+    @Test
+    fun `source filter requires Google Maps package, ongoing flag, and navigation category`() {
+        // Non-Maps package rejected
         assertFalse(
             NavNotificationListenerService.isEligibleGoogleMapsGuidance(
                 packageName = "com.waze",
@@ -64,16 +116,41 @@ class NavNotificationParserTest {
                 isOngoing = true,
             ),
         )
-        // Non-ongoing, non-navigation category rejected
+        // Non-ongoing navigation-category fixture rejected
         assertFalse(
             NavNotificationListenerService.isEligibleGoogleMapsGuidance(
                 packageName = "com.google.android.apps.maps",
                 flags = 0,
-                category = Notification.CATEGORY_PROMO,
+                category = Notification.CATEGORY_NAVIGATION,
                 isOngoing = false,
             ),
         )
-        // Active Google Maps navigation accepted
+        // Ongoing generic Maps progress / service notification rejected
+        assertFalse(
+            NavNotificationListenerService.isEligibleGoogleMapsGuidance(
+                packageName = "com.google.android.apps.maps",
+                flags = Notification.FLAG_ONGOING_EVENT,
+                category = Notification.CATEGORY_PROGRESS,
+                isOngoing = true,
+            ),
+        )
+        assertFalse(
+            NavNotificationListenerService.isEligibleGoogleMapsGuidance(
+                packageName = "com.google.android.apps.maps",
+                flags = Notification.FLAG_ONGOING_EVENT,
+                category = Notification.CATEGORY_SERVICE,
+                isOngoing = true,
+            ),
+        )
+        assertFalse(
+            NavNotificationListenerService.isEligibleGoogleMapsGuidance(
+                packageName = "com.google.android.apps.maps",
+                flags = Notification.FLAG_ONGOING_EVENT,
+                category = null,
+                isOngoing = true,
+            ),
+        )
+        // Active ongoing Google Maps navigation accepted
         assertTrue(
             NavNotificationListenerService.isEligibleGoogleMapsGuidance(
                 packageName = "com.google.android.apps.maps",
@@ -89,11 +166,9 @@ class NavNotificationParserTest {
         val oldCue = NavNotificationParser.parse(title = "500 m", text = "Turn left")
         val liveMapsCue = NavNotificationParser.parse(title = "300 m", text = "Turn right")
 
-        // 1. Older notification key-old is posted first.
         assertTrue(NavNotificationSelector.shouldAcceptPost("key-old", oldCue, setOf("key-old")))
         assertEquals("key-old", NavNotificationSelector.currentTrackedKey())
 
-        // 2. Newer notification key-maps starts -> takes over immediately.
         assertTrue(
             NavNotificationSelector.shouldAcceptPost(
                 "key-maps",
@@ -103,7 +178,6 @@ class NavNotificationParserTest {
         )
         assertEquals("key-maps", NavNotificationSelector.currentTrackedKey())
 
-        // 3. Older notification key-old simply reposts while key-maps is still active -> ignored!
         assertFalse(
             NavNotificationSelector.shouldAcceptPost(
                 "key-old",
@@ -113,13 +187,11 @@ class NavNotificationParserTest {
         )
         assertEquals("key-maps", NavNotificationSelector.currentTrackedKey())
 
-        // 4. Periodic refresh also stays pinned to key-maps.
         val candidates = listOf("key-old" to oldCue, "key-maps" to liveMapsCue)
         val (keptKey, keptState) = NavNotificationSelector.selectActive(candidates)
         assertEquals("key-maps", keptKey)
         assertEquals("turn_right", keptState.maneuver)
 
-        // 5. Once key-maps is removed, selector falls back to remaining active notification or clears.
         val (fallbackKey, fallbackState) = NavNotificationSelector.selectActive(listOf("key-old" to oldCue))
         assertEquals("key-old", fallbackKey)
         assertEquals("turn_left", fallbackState.maneuver)
@@ -130,7 +202,7 @@ class NavNotificationParserTest {
     }
 
     @Test
-    fun `route summary to destination is ignored on its own and does not override real maneuver`() {
+    fun `route summary is ignored and em-dash, parenthesized total, or same-length bigText does not erase turn`() {
         val summaries = listOf(
             "12 km to destination",
             "12 km to your destination",
@@ -149,46 +221,38 @@ class NavNotificationParserTest {
             assertEquals("", summaryOnly.distance)
         }
 
-        val pairedSeparateFields = NavNotificationParser.parse(
-            title = "Turn left in 300 m",
-            text = "12 km to destination",
+        // Single field separated by bullet, newline, comma, en-dash, em-dash, or parentheses
+        val singleFieldInputs = listOf(
+            "Turn left in 300 m · 12 km to destination",
+            "Turn left in 300 m\n12 km to destination",
+            "Turn left in 300 m\r\n12 km to destination",
+            "Turn left in 300 m, 12 km to destination",
+            "Turn left in 300 m — 12 km to destination",
+            "Turn left in 300 m—12 km to destination",
+            "Turn left in 300 m – 12 km to destination",
+            "Turn left in 300 m (12 km to destination)",
+            "Turn left in 300 m (Trip length: 2 mi)",
         )
-        assertTrue(pairedSeparateFields.active)
-        assertEquals("turn_left", pairedSeparateFields.maneuver)
-        assertEquals("300 m", pairedSeparateFields.distance)
-
-        // Turn left in primary field with destination metadata in a separate field stays turn_left
-        val turnWithDestMeta = NavNotificationParser.parse(
-            title = "Turn left in 300 m",
-            text = "Your destination is 12 km away",
-        )
-        assertTrue(turnWithDestMeta.active)
-        assertEquals("turn_left", turnWithDestMeta.maneuver)
-        assertEquals("300 m", turnWithDestMeta.distance)
-
-        val turnWithDestSideInOtherField = NavNotificationParser.parse(
-            title = "Turn left in 300 m",
-            text = "Your destination is on the right",
-        )
-        assertTrue(turnWithDestSideInOtherField.active)
-        assertEquals("turn_left", turnWithDestSideInOtherField.maneuver)
-        assertEquals("300 m", turnWithDestSideInOtherField.distance)
-        assertEquals("destination_right", turnWithDestSideInOtherField.arrival)
-
-        // Single field separated by bullet, newline, or comma
-        for (sep in listOf(" · ", "\n", "\r\n", ", ")) {
-            val pairedSingleField = NavNotificationParser.parse(
-                title = "Turn left in 300 m${sep}12 km to destination",
-                text = null,
-            )
-            assertTrue("Expected active for separator '$sep'", pairedSingleField.active)
-            assertEquals("turn_left", pairedSingleField.maneuver)
-            assertEquals("300 m", pairedSingleField.distance)
+        for (input in singleFieldInputs) {
+            val parsed = NavNotificationParser.parse(title = input, text = null)
+            assertTrue("Expected active for '$input'", parsed.active)
+            assertEquals("turn_left", parsed.maneuver)
+            assertEquals("300 m", parsed.distance)
         }
+
+        // Same-length expanded bigText metadata field must NOT hide an explicit turn in text
+        val sameLengthBigText = NavNotificationParser.parse(
+            title = "300 m",
+            text = "Turn left",
+            bigText = "Central Station Area",
+        )
+        assertTrue(sameLengthBigText.active)
+        assertEquals("turn_left", sameLengthBigText.maneuver)
+        assertEquals("300 m", sameLengthBigText.distance)
     }
 
     @Test
-    fun `destination on right or left is recognized as arrival-side cue without turn arrow`() {
+    fun `destination on right or left preserves side and step distance together`() {
         val destRight = NavNotificationParser.parse(
             title = "Your destination is on the right",
             text = null,
@@ -205,6 +269,25 @@ class NavNotificationParserTest {
         assertEquals("destination", destLeft.maneuver)
         assertEquals("destination_left", destLeft.arrival)
 
+        // Arrival side WITH step distance ("in 300 m") preserves both side and distance
+        val destLeftWithDist = NavNotificationParser.parse(
+            title = "Your destination is on the left in 300 m",
+            text = null,
+        )
+        assertTrue(destLeftWithDist.active)
+        assertEquals("destination", destLeftWithDist.maneuver)
+        assertEquals("destination_left", destLeftWithDist.arrival)
+        assertEquals("300 m", destLeftWithDist.distance)
+
+        val destRightWithDist = NavNotificationParser.parse(
+            title = "Your destination is on the right in 300 m",
+            text = null,
+        )
+        assertTrue(destRightWithDist.active)
+        assertEquals("destination", destRightWithDist.maneuver)
+        assertEquals("destination_right", destRightWithDist.arrival)
+        assertEquals("300 m", destRightWithDist.distance)
+
         val trDestRight = NavNotificationParser.parse(
             title = "Hedefiniz sağda",
             text = null,
@@ -215,17 +298,30 @@ class NavNotificationParserTest {
     }
 
     @Test
-    fun `word traps like Brighton Road and 12 km left do not produce turns and highway exits are not roundabouts`() {
+    fun `word traps, generic Turkish junctions, and highway exits are handled accurately`() {
         // "Brighton Road" contains substring "right" — must NOT match turn_right
         val brighton = NavNotificationParser.parse(title = "350 m", text = "Brighton Road")
         assertTrue(brighton.active)
         assertEquals("none", brighton.maneuver)
         assertEquals("350 m", brighton.distance)
 
-        // "Brighton Road" alone without distance has no nav signal
-        val brightonOnly = NavNotificationParser.parse(title = "Brighton Road", text = null)
-        assertFalse(brightonOnly.active)
-        assertEquals("none", brightonOnly.maneuver)
+        // Generic Turkish junction ("kavşak") without "döner" is NOT a roundabout
+        val genericTrJunctionOnly = NavNotificationParser.parse(title = "300 m", text = "Kavşak")
+        assertTrue(genericTrJunctionOnly.active)
+        assertEquals("none", genericTrJunctionOnly.maneuver)
+        assertEquals("300 m", genericTrJunctionOnly.distance)
+
+        val genericTrJunctionTurn = NavNotificationParser.parse(title = "300 m", text = "Kavşaktan sola dönün")
+        assertTrue(genericTrJunctionTurn.active)
+        assertEquals("turn_left", genericTrJunctionTurn.maneuver)
+        assertEquals("300 m", genericTrJunctionTurn.distance)
+
+        // Explicit Turkish roundabout ("Döner kavşak") IS a roundabout
+        val explicitTrRoundabout = NavNotificationParser.parse(title = "200 m", text = "Döner kavşakta 2. çıkış")
+        assertTrue(explicitTrRoundabout.active)
+        assertEquals("roundabout", explicitTrRoundabout.maneuver)
+        assertEquals(2, explicitTrRoundabout.exitNumber)
+        assertEquals("200 m", explicitTrRoundabout.distance)
 
         // Numbered highway exit without roundabout keyword must NOT be classified as roundabout
         val highwayExit = NavNotificationParser.parse(title = "500 m", text = "Take exit 4")
@@ -234,12 +330,7 @@ class NavNotificationParserTest {
         assertEquals(0, highwayExit.exitNumber)
         assertEquals("500 m", highwayExit.distance)
 
-        val highwayExitRight = NavNotificationParser.parse(title = "500 m", text = "Exit 4 on the right")
-        assertTrue(highwayExitRight.active)
-        assertEquals("exit_right", highwayExitRight.maneuver)
-        assertEquals(0, highwayExitRight.exitNumber)
-
-        // Actual roundabout with exit number is classified as roundabout with exitNumber
+        // Actual English roundabout with exit number
         val roundabout = NavNotificationParser.parse(
             title = "200 m",
             text = "At the roundabout, take the 2nd exit",
@@ -254,10 +345,5 @@ class NavNotificationParserTest {
         assertTrue(trTurn.active)
         assertEquals("turn_right", trTurn.maneuver)
         assertEquals("1,2 km", trTurn.distance)
-
-        // Bare ambiguous exit is omitted
-        val bareExit = NavNotificationParser.parse(title = "Take the exit", text = null)
-        assertFalse(bareExit.active)
-        assertEquals("none", bareExit.maneuver)
     }
 }

@@ -31,11 +31,28 @@ and includes:
 
 The app **does not** access:
 
-- Location, GPS, route, or destination data
+- Location, GPS coordinates, street names, destination names, or addresses
 - Microphone, camera, contacts, calendar, SMS, call log
 - Any account / identity / advertising identifier
 - The Vehicle Identification Number (VIN) or any other identifier that could
   be linked to a specific car or owner
+
+### Optional turn-by-turn maneuver forwarding (experimental, off by default)
+
+By default (`Nav: OFF`), the app does not read any notifications. If the user
+explicitly enables the in-app `Nav` toggle and grants Android Notification
+Access to the app in system settings:
+
+- The app transiently inspects ongoing navigation guidance notifications from
+  Google Maps (`com.google.android.apps.maps`) in memory.
+- Only four sanitized fields are extracted and forwarded to the local receiver:
+  the canonical next-maneuver direction token (`turn_left`, `turn_right`,
+  `roundabout`, etc.), the next-maneuver distance (e.g. `"300 m"`), the
+  roundabout exit number (`1..9`), and the arrival/destination-side token
+  (`destination`, `destination_left`, `destination_right`).
+- Street names, destination names/addresses, ETA, and raw notification text are
+  discarded immediately in memory and are **never** retained, transmitted on the
+  wire, or written to Pi disk logs.
 
 ## What the app does with that data
 
@@ -86,15 +103,16 @@ purpose stated:
 | `android.permission.CHANGE_NETWORK_STATE` | Request and hold the Pi's internet-less WiFi network so Android keeps it usable for the bridge. |
 | `android.permission.FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `POST_NOTIFICATIONS` | Keep the bridge running while the app is in the background; show an ongoing notification so the user can see and stop it. |
 | `android.permission.RECEIVE_BOOT_COMPLETED` | Restart the bridge automatically when the head unit boots, so the display works without opening the app each trip. |
+| `android.permission.BIND_NOTIFICATION_LISTENER_SERVICE` *(optional, user-granted in Settings)* | Used only when the user enables the `Nav` opt-in toggle, to read ongoing Google Maps guidance notifications in memory and extract the next-maneuver direction, next-maneuver distance, and arrival-side cue. |
 
 ## Data retention and deletion
 
-The app stores only the user-typed Pi host address in SharedPreferences. It
-can be cleared by uninstalling the app or by overwriting the value in the
-app's main screen.
+The app stores only the user-typed Pi host address and the boolean `nav_enabled`
+opt-in toggle in SharedPreferences. Both can be cleared by uninstalling the app
+or from the app's main screen.
 
-Vehicle telemetry is never retained on the device. It is forwarded to the
-user-supplied local address and discarded.
+Vehicle telemetry and transient navigation cues are never retained on the
+device. They are forwarded to the user-supplied local address and discarded.
 
 ## Children
 

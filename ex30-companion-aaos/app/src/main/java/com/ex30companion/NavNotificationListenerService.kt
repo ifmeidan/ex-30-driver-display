@@ -223,9 +223,9 @@ class NavNotificationListenerService : NotificationListenerService() {
 
         /**
          * Pure source & metadata filter checked BEFORE reading notification text.
-         * Accepts only ongoing navigation guidance notifications from Google Maps
-         * (`com.google.android.apps.maps`), rejecting group summaries and
-         * non-guidance categories.
+         * Accepts only active ongoing navigation guidance notifications from
+         * Google Maps (`com.google.android.apps.maps`), rejecting group summaries,
+         * non-ongoing notifications, and generic progress/service notifications.
          */
         fun isEligibleGoogleMapsGuidance(
             packageName: String?,
@@ -236,10 +236,8 @@ class NavNotificationListenerService : NotificationListenerService() {
             if (packageName != NavNotificationSelector.GOOGLE_MAPS_PACKAGE) return false
             if ((flags and Notification.FLAG_GROUP_SUMMARY) != 0) return false
             val ongoingFlag = isOngoing || (flags and Notification.FLAG_ONGOING_EVENT) != 0
-            if (category == Notification.CATEGORY_NAVIGATION) return true
             if (!ongoingFlag) return false
-            return category == null || category == Notification.CATEGORY_SERVICE ||
-                category == Notification.CATEGORY_TRANSPORT || category == Notification.CATEGORY_PROGRESS
+            return category == Notification.CATEGORY_NAVIGATION
         }
 
         fun isEligibleGoogleMapsGuidance(sbn: StatusBarNotification): Boolean {

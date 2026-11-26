@@ -448,3 +448,61 @@ def test_new_session_clears_previous_nav_cue_and_logs_diag_without_late_clobber(
             assert "nav cleared: reason=" in diag_text
     finally:
         rec.stop()
+
+
+def test_in_flight_old_session_goodbye_or_nav_cannot_clear_new_session_cue(tmp_path):
+    """If an old session thread was paused after reading a goodbye/nav line and
+    resumes after a new session has taken over and set a right turn, atomic
+    session ownership under _conn_lock must ignore the stale in-flight frame."""
+    shared = SharedVehicleData()
+    port = _free_port()
+    rec = AaosBridgeReceiver(
+        shared,
+        host="127.0.0.1",
+        port=port,
+        log_dir=str(tmp_path),
+        stale_after_s=5.0,
+        nav_stale_after_s=5.0,
+        nav_enabled=True,
+    )
+    rec.start()
+    time.sleep(0.1)
+    try:
+        s1 = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+        s2 = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+        try:
+            s2.sendall((json.dumps({
+                "type": "nav",
+                "ts": 100,
+                "src": "aaos",
+                "nav": {
+                    "active": True,
+                    "maneuver": "turn_right",
+                    "distance": "250 m",
+                    "arrival": "none",
+                    "exit": 0,
+                },
+            }) + "\n").encode("utf-8"))
+            assert _wait_until(lambda: shared.snapshot().nav_maneuver == "turn_right")
+
+            # Simulate an in-flight goodbye or nav frame from the superseded
+            # connection s1 resuming inside _process_line after s2 took over.
+            fake_old_conn = object()
+            rec._process_line(
+                b'{"type":"goodbye","ts":101,"reason":"app_paused"}',
+                conn=fake_old_conn,
+            )
+            rec._process_line(
+                b'{"type":"nav","ts":102,"src":"aaos","nav":{"active":false}}',
+                conn=fake_old_conn,
+            )
+
+            snap = shared.snapshot()
+            assert snap.nav_active is True
+            assert snap.nav_maneuver == "turn_right"
+            assert snap.nav_distance == "250 m"
+        finally:
+            s1.close()
+            s2.close()
+    finally:
+        rec.stop()
