@@ -14,6 +14,9 @@ it yourself: the app is distributed through Google Play (closed beta
 today, public once the conditions are met — see the
 [setup guide](../SETUP.md)).
 
+For changes to Wi-Fi, Android compatibility and optional features in each build,
+see the [AAOS and Raspberry Pi runner version notes](../CHANGELOG.md).
+
 ## What it does
 
 - Subscribes to 13 vehicle properties (speed, SoC, battery power, range,
