@@ -20,8 +20,7 @@ constants used in `properties.md`; the snippet mirrors the app's actual
 <uses-permission android:name="android.car.permission.CAR_ENERGY" />
 <uses-permission android:name="android.car.permission.CAR_SPEED" />
 
-<!-- Network for the Pi bridge (all Normal tier). CHANGE_NETWORK_STATE is
-     what lets BridgeClient requestNetwork()-hold the internet-less Pi AP. -->
+<!-- Local bridge socket, WiFi radio state and Android network requests -->
 <uses-permission android:name="android.permission.INTERNET" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -49,9 +48,19 @@ constants used in `properties.md`; the snippet mirrors the app's actual
 | `CAR_ENERGY` | Dangerous | runtime | SoC, range, battery temp/capacity, charge state/time/limits/draw, regen state |
 | `CAR_SPEED` | Dangerous | runtime | speed (raw + display-calibrated) |
 
+## WiFi connection approval
+
+When the user supplies a WiFi name, the foreground bridge service requests that
+exact network from Android with `WifiNetworkSpecifier` and the existing
+install-time `CHANGE_NETWORK_STATE` permission. The user approves the
+access point in Android's network dialog. Android can reuse this approval on a
+later request. If WiFi is off, the user can open system settings from Companion
+and turn it on. With no WiFi name configured, the app uses the network selected
+by the user in car settings.
+
 ## Runtime permission request flow
 
-1. App launch → check `ContextCompat.checkSelfPermission` for each Dangerous one.
+1. On launch, check `ContextCompat.checkSelfPermission` for each dangerous vehicle permission.
 2. If any missing, route to a `RationaleActivity` that explains:
    - What we read (broadly: vehicle telemetry — speed, gear, EV state, etc.)
    - That we **never** write to the car

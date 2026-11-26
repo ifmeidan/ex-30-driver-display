@@ -15,7 +15,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="Pi host (e.g. 10.0.0.42)"
+            android:hint="@string/pi_host_hint"
             android:imeOptions="actionDone"
             android:inputType="textUri"
             android:singleLine="true" />
@@ -25,6 +25,28 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Connect" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="8dp">
+
+        <Button
+            android:id="@+id/wifi_setup"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/wifi_setup" />
+
+        <TextView
+            android:id="@+id/wifi_status"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:accessibilityLiveRegion="polite"
+            android:paddingHorizontal="8dp" />
 
         <Button
             android:id="@+id/soak_toggle"

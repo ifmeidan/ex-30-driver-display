@@ -1,6 +1,6 @@
 # Privacy Policy — EX30 Companion
 
-**Last updated**: 19 July 2026 · **Applies to**: app version 1.0.0 and later
+**Last updated**: 26 November 2026
 
 EX30 Companion ("the app") is a free, open-source companion app for the
 Raspberry Pi EX30 driver display project. This policy describes what data the
@@ -99,17 +99,22 @@ purpose stated:
 | `android.car.permission.CAR_ENERGY` | Read battery level, charge rate, range. |
 | `android.car.permission.CAR_SPEED` | Read vehicle speed. |
 | `android.car.permission.CAR_INFO` | Read battery pack capacity (used to compute SoC %). |
-| `android.permission.INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE` | Open the TCP connection to the user-supplied local address; bind that connection to the WiFi network rather than cellular. |
-| `android.permission.CHANGE_NETWORK_STATE` | Request and hold the Pi's internet-less WiFi network so Android keeps it usable for the bridge. |
+| `android.permission.INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE` | Check whether WiFi is enabled and open the bridge socket on WiFi to the user's local receiver. |
+| `android.permission.CHANGE_NETWORK_STATE` | Ask Android to connect to the user-specified access point and keep its local network available for the bridge. |
 | `android.permission.FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `POST_NOTIFICATIONS` | Keep the bridge running while the app is in the background; show an ongoing notification so the user can see and stop it. |
 | `android.permission.RECEIVE_BOOT_COMPLETED` | Restart the bridge automatically when the head unit boots, so the display works without opening the app each trip. |
 | `android.permission.BIND_NOTIFICATION_LISTENER_SERVICE` *(optional, user-granted in Settings)* | Used only when the user enables the `Nav` opt-in toggle, to read ongoing Google Maps guidance notifications in memory and extract the next-maneuver direction, next-maneuver distance, and arrival-side cue. |
 
 ## Data retention and deletion
 
-The app stores only the user-typed Pi host address and the boolean `nav_enabled`
-opt-in toggle in SharedPreferences. Both can be cleared by uninstalling the app
-or from the app's main screen.
+The app stores the Pi host address, optional WiFi network name (SSID) and
+navigation opt-in on the head unit. For a WPA2 access point, it also stores the
+passphrase encrypted with a key held in Android Keystore. Android uses the name
+and passphrase to join the selected network. The app remembers whether this
+profile connected successfully so it can retry when the receiver starts late.
+WiFi credentials stay out of bridge messages. To remove the saved WiFi credentials, clear the WiFi name and save
+the connection settings. Clearing the app's storage or uninstalling it removes
+all of these settings.
 
 Vehicle telemetry and transient navigation cues are never retained on the
 device. They are forwarded to the user-supplied local address and discarded.

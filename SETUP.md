@@ -19,7 +19,7 @@ Expect roughly an afternoon for the bench setup and an hour in the car.
 | Passive aluminum Pi case | Fanless cooling |
 | 12 V→5 V step-down converter, 3 A, USB-C (dashcam hardwire kit) | Powers Pi + display from an **ignition-switched** fuse |
 | FPC micro-HDMI ribbon cable, right-angle USB-A→USB-C cable | For a clean install behind the trim |
-| A Volvo EX30 | Any trim; the head unit runs Android Automotive 12L |
+| A Volvo EX30 | Any trim with Android Automotive 12L or later |
 
 You'll also need a computer to flash the SD card, and (only during
 setup) a way to SSH into the Pi — Ethernet or your home WiFi.
@@ -159,9 +159,8 @@ journalctl -u driver-display -f
 
 ## 6. Get the AAOS companion app
 
-The **EX30 Companion** app installs through Google Play on the car (AAOS
-does not allow sideloading). The current release is **v1.0.1**, in
-**closed testing**:
+The **EX30 Companion** app installs through Google Play on the car's
+closed testing track.
 
 > **To join**: open an issue on this repository (or contact
 > [@ifmeidan](https://github.com/ifmeidan)) with the Google account
@@ -183,13 +182,19 @@ only returns after a power cycle.
 
 ## 7. Configure the app (one-time, while parked)
 
-1. **Join the Pi's WiFi**: car Settings → Network → WiFi → connect to
-   **`ex30-pi`** with the passphrase you set during AP install. The network has no
-   internet — if the head unit asks, choose **"Stay connected"** /
-   "Keep this network". The car keeps using its own cellular data for
-   everything else; the app pins only its own socket to this WiFi.
-2. Open **EX30 Companion**, enter the Pi host: **`192.168.4.1`**, tap
-   **Connect**.
+1. Power on the receiver and open **EX30 Companion**. Enter the Pi host
+   (`192.168.4.1` by default). Tap **Wi-Fi** and enter the exact network
+   name (`ex30-pi` or your custom SSID). For the Pi setup in step 4, select
+   **WPA2 password required** and enter your passphrase. Leave that option
+   unchecked for an open access point.
+2. Tap **Save and connect**. If WiFi is off, choose **Open Wi-Fi settings**
+   to switch it on, then return to Companion. Approve the network in the
+   Android connection dialog. The app saves the settings on the head unit
+   and requests that network again when the bridge starts or wakes.
+   Android can reuse your approval on later connections. If a previously
+   connected receiver is still starting, the bridge retries up to three
+   times during that wake cycle. The access point needs no internet
+   connection. Android manages internet access for other apps.
 3. **Grant the car permissions** when prompted (a one-time consolidated
    prompt): vehicle **speed** and **energy** are "dangerous"-tier on
    AAOS and need explicit approval; the rest are granted at install.
@@ -201,8 +206,12 @@ only returns after a power cycle.
    - **Battery / App power management** (naming varies by head-unit
      software version): set to **Unrestricted / Not optimized**, so the
      system never puts the bridge service to sleep mid-drive.
-   The app auto-starts on head-unit boot and reconnects on its own; you
-   should never need to open it again after this screen.
+   The bridge service starts again on head-unit boot.
+
+For a host-only setup, leave the WiFi name empty and join the receiver's
+network in car Settings → Network → WiFi. Choose **Stay connected** if
+Android reports that it has no internet. Existing host-only setups and
+versions showing only a host field use this method.
 
 ## 8. First drive checklist
 
@@ -222,8 +231,8 @@ only returns after a power cycle.
 | Symptom | Check |
 |---|---|
 | `VEHICLE DATA` never connects | `sudo systemctl status rfcomm-bind`; re-pair with `bluetoothctl` (PIN `1234`); car must be awake |
-| `CABIN LINK` never connects | Head unit joined `ex30-pi`? App host set to `192.168.4.1`? Battery optimization disabled for the app? |
-| Head unit drops the `ex30-pi` WiFi | Re-select it and confirm "Stay connected" despite no internet |
+| `CABIN LINK` never connects | Check receiver power, WiFi, the exact SSID and WPA2 passphrase, and the Pi host address. If you dismissed the network request or Android could not connect, tap **Connect** to retry. |
+| Host-only setup loses WiFi after a restart | Enable auto-connect for the receiver's network in car WiFi settings, or enter its SSID and passphrase in Companion so the app can request it. |
 | Display blank | `journalctl -u driver-display -f`; HDMI ribbon seated? `display_auto_detect=0` present in `/boot/firmware/config.txt`? cage needs seatd — `systemctl status seatd` |
 | Clock wrong on the display | `./scripts/install_clock_sync.sh` run? Timezone set? It corrects within seconds of the first AAOS frame |
 | Speed shows `–` | The AAOS bridge is stale (15 s without frames) — speed is AAOS-only by design (see the README source table). Check the AAOS dot bottom-left, the head unit's WiFi, and the app's battery-optimization setting |

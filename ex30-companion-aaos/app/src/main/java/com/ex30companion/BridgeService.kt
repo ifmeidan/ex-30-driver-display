@@ -39,10 +39,9 @@ class BridgeService : Service() {
         carService = CarPropertyService(this).also { it.start() }
         bridge = BridgeClient(
             this,
-            hostProvider = { BridgeSettings.host(this) },
             parkedState = monitor.state,
             navEnabledProvider = { BridgeSettings.navEnabled(this) },
-        ).also { it.start() }
+        )
         // Parked flips also trim/restore the VHAL subscriptions themselves —
         // no 30 Hz power callbacks for a locked, empty car.
         scope.launch {
@@ -51,6 +50,7 @@ class BridgeService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        bridge?.start(reconnect = intent?.action == ACTION_CONNECT)
         // START_STICKY: if Android kills us under memory pressure, restart
         // automatically with a null intent. Acceptable because every dependency
         // (host setting, repository) is global state, not request-scoped.
@@ -102,8 +102,12 @@ class BridgeService : Service() {
         private const val CHANNEL_ID = "ex30_bridge_status"
         private const val NOTIFICATION_ID = 1
 
-        fun start(context: Context) {
-            val intent = Intent(context, BridgeService::class.java)
+        private const val ACTION_CONNECT = "com.ex30companion.CONNECT"
+
+        fun connect(context: Context) = start(context, ACTION_CONNECT)
+
+        fun start(context: Context, action: String? = null) {
+            val intent = Intent(context, BridgeService::class.java).setAction(action)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {

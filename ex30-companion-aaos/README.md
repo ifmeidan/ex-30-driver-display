@@ -23,8 +23,8 @@ today, public once the conditions are met — see the
   [`docs/properties.md`](docs/properties.md).
 - Streams them as line-delimited JSON over TCP to the Pi at `:7878` —
   wire protocol in [`pi_bridge/protocol.md`](pi_bridge/protocol.md).
-- Pins its socket to the Pi's internet-less WiFi AP so frames flow even
-  while the head unit prefers cellular.
+- Requests the saved Pi WiFi network when the head unit starts or wakes
+  and sends bridge traffic over it while cellular provides internet access.
 - Goes quiet when you leave the car (ignition/screen-off detection) so
   it never drains the 12 V battery or holds the vehicle network awake;
   stays up while charging so the Pi can render the charging screen.
@@ -48,12 +48,9 @@ today, public once the conditions are met — see the
 Standard Android Gradle project: open in Android Studio (AGP 9.x,
 JDK 17) and assemble a debug build.
 
-SDK levels, decoded: the EX30's head unit runs **Android Automotive 12L
-(API 32)** — that's `minSdk 32`, and the platform everything in this
-repository was verified on. `targetSdk 34` exists only because Google
-Play refuses uploads targeting anything older; nothing in the app
-depends on API 34 behaviour. `compileSdk 35` is just the build-against
-SDK.
+The minimum supported version is Android Automotive 12L (API 32).
+The app builds against and targets Android 15 (API 35). The WiFi reconnect
+flow was also tested on an Android Automotive 15 emulator with a WPA2 access point.
 
 ```bash
 ./gradlew assembleDebug     # debug APK

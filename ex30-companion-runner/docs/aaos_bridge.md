@@ -206,11 +206,10 @@ Pi's AP IP. OBD link is Bluetooth so the WiFi radio is free.
 - `connection.autoconnect-priority 100` so the AP wins over any
   remembered client SSIDs at boot.
 
-The companion app's `BridgeClient` binds its socket to the WiFi
-`Network` via `ConnectivityManager.registerNetworkCallback`, so the
-bridge frames flow over WiFi even when the head unit treats cellular as
-its default route and Android marks the internet-less SSID as "not
-validated."
+The companion app requests the configured SSID as a local WiFi network
+and opens the bridge socket on the network Android supplies. This works
+with an internet-less AP while cellular is the default route. Leave the
+SSID empty to use a WiFi network joined manually in car settings.
 
 If the head unit ever refuses to keep an internet-less network up
 despite the user tapping "Stay connected," the fallback would be a tiny
