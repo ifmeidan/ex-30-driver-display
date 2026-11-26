@@ -56,8 +56,12 @@ class NavNotificationListenerService : NotificationListenerService() {
 
         val parsed = parseNotification(sbn.notification)
         if (parsed.active) {
-            activeNavKey = sbn.key
-            NavStateRepository.update(parsed)
+            if (activeNavKey == null || activeNavKey == sbn.key) {
+                activeNavKey = sbn.key
+                NavStateRepository.update(parsed)
+            } else {
+                refreshFromActive()
+            }
         } else if (sbn.key == activeNavKey) {
             refreshFromActive()
         }
@@ -87,15 +91,18 @@ class NavNotificationListenerService : NotificationListenerService() {
             null
         }
         if (active != null) {
-            for (sbn in active) {
-                if (!isCandidateNavigation(sbn)) continue
-                val parsed = parseNotification(sbn.notification)
-                if (parsed.active) {
-                    activeNavKey = sbn.key
-                    NavStateRepository.update(parsed)
-                    return
-                }
+            val candidates = active.mapNotNull { sbn ->
+                if (!isCandidateNavigation(sbn)) null
+                else sbn.key to parseNotification(sbn.notification)
             }
+            val (selectedKey, selectedState) = NavNotificationSelector.selectActive(candidates, activeNavKey)
+            activeNavKey = selectedKey
+            if (selectedState.active) {
+                NavStateRepository.update(selectedState)
+            } else {
+                NavStateRepository.clear()
+            }
+            return
         }
         activeNavKey = null
         NavStateRepository.clear()

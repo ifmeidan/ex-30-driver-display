@@ -51,6 +51,26 @@ object NavStateRepository {
 }
 
 /**
+ * Selects which active navigation notification to track across refreshes.
+ * Stays pinned to [currentKey] as long as it remains present and active in
+ * [candidates], and only switches when [currentKey] disappears or becomes
+ * inactive.
+ */
+object NavNotificationSelector {
+    fun selectActive(
+        candidates: List<Pair<String, NavState>>,
+        currentKey: String?,
+    ): Pair<String?, NavState> {
+        if (currentKey != null) {
+            val pinned = candidates.firstOrNull { it.first == currentKey && it.second.active }
+            if (pinned != null) return pinned
+        }
+        val firstActive = candidates.firstOrNull { it.second.active }
+        return firstActive ?: (null to NavState())
+    }
+}
+
+/**
  * Extracts only the next maneuver token, distance, and roundabout exit number
  * from navigation notification fields (English and Turkish), discarding any
  * street/address text immediately.
@@ -92,10 +112,12 @@ object NavNotificationParser {
         "sixth" to 6,
     )
 
-    private val NON_TURN_DISTANCE_REGEX = Regex(
-        """\b(?:\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|dk|dakika|saat)|eta|remaining|kalan|trip\s+length|route\s+length|total|toplam)\b|\b\d{1,2}:\d{2}\b""",
+    private val ROUTE_SUMMARY_REGEX = Regex(
+        """\b(?:\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|dk|dakika|saat)|eta|remaining|kalan|trip\s+length|route\s+length|total|toplam|to\s+destination|from\s+destination|distance\s+to\s+destination|hedefe|var[ıi][şs]a)\b|\b\d{1,2}:\d{2}\b""",
         RegexOption.IGNORE_CASE,
     )
+
+    private val CLAUSE_SPLIT_REGEX = Regex("""\s*(?:[·•|;\n]|\s-\s)\s*""")
 
     private val PURE_DISTANCE_REGEX = Regex(
         """^\s*\d+(?:[.,]\d+)?\s*(?:km|m|mi|ft|yd)\s*$""",
@@ -108,10 +130,10 @@ object NavNotificationParser {
         bigText: String? = null,
         iconHint: String? = null,
     ): NavState {
-        val cleanTitle = cleanSpace(title)
-        val cleanText = cleanSpace(text)
-        val cleanBig = cleanSpace(bigText)
-        val cleanHint = cleanSpace(iconHint)
+        val cleanTitle = stripRouteSummaryClauses(cleanSpace(title))
+        val cleanText = stripRouteSummaryClauses(cleanSpace(text))
+        val cleanBig = stripRouteSummaryClauses(cleanSpace(bigText))
+        val cleanHint = stripRouteSummaryClauses(cleanSpace(iconHint))
         val body = if (cleanBig.length > cleanText.length && cleanBig.contains(cleanText, ignoreCase = true)) {
             cleanBig
         } else {
@@ -143,12 +165,20 @@ object NavNotificationParser {
         )
     }
 
+    private fun stripRouteSummaryClauses(raw: String): String {
+        if (raw.isEmpty()) return ""
+        return raw.split(CLAUSE_SPLIT_REGEX)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !ROUTE_SUMMARY_REGEX.containsMatchIn(it) }
+            .joinToString(" · ")
+    }
+
     private fun extractVerifiedTurnDistance(title: String, body: String): String {
-        if (title.isNotEmpty() && !NON_TURN_DISTANCE_REGEX.containsMatchIn(title)) {
+        if (title.isNotEmpty() && !ROUTE_SUMMARY_REGEX.containsMatchIn(title)) {
             val fromTitle = extractDistance(title)
             if (fromTitle.isNotEmpty()) return fromTitle
         }
-        if (body.isNotEmpty() && !NON_TURN_DISTANCE_REGEX.containsMatchIn(body)) {
+        if (body.isNotEmpty() && !ROUTE_SUMMARY_REGEX.containsMatchIn(body)) {
             // Accept body distance only when it's a standalone turn-distance token
             // or there is no separate title line.
             if (title.isEmpty() || PURE_DISTANCE_REGEX.matches(body)) {
@@ -194,9 +224,6 @@ object NavNotificationParser {
         val isRoundabout = hasAny("döner kavşak", "kavşağ", "kavşak", "roundabout", "rotary", "traffic circle")
         if (isRoundabout || exitNumber > 0) return "roundabout" to true
         if (hasAny("u dönüş", "u-turn", "u turn", "make a u")) return "uturn" to true
-        if (hasAny("variş", "hedef", "varacağiniz", "destination", "arrive", "arrived", "your stop")) {
-            return "destination" to true
-        }
         if (hasAny("keskin sol", "tam sol", "sharp left")) return "sharp_left" to true
         if (hasAny("keskin sağ", "tam sağ", "sharp right")) return "sharp_right" to true
         if (hasAny("hafif sol", "sola doğru", "soldan devam", "sol şeritten", "solda kal", "keep left", "bear left", "slight left", "stay left")) {
@@ -211,6 +238,9 @@ object NavNotificationParser {
         if (hasAny("sola dön", "sola", "turn left", "left")) return "turn_left" to true
         if (hasAny("sağa dön", "sağa", "turn right", "right")) return "turn_right" to true
         if (hasAny("katil", "birleş", "merge")) return "merge" to true
+        if (hasAny("variş", "hedef", "varacağiniz", "destination", "arrive", "arrived", "your stop")) {
+            return "destination" to true
+        }
         if (hasAny("düz", "devam", "ileri", "straight", "continue", "head ", "keep going")) {
             return "straight" to true
         }

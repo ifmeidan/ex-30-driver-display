@@ -90,6 +90,8 @@ dependencies {
     // CVE-2024-10382 fix so Play's SDK scanner stays quiet.
     implementation("androidx.car.app:app:1.7.0")
     implementation("androidx.car.app:app-automotive:1.7.0")
+
+    testImplementation("junit:junit:4.13.2")
 }
 
 // Phase 2 read-only invariant: fail the build if any vehicle-property write
