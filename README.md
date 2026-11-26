@@ -6,6 +6,8 @@ steering wheel, rendering speed, battery, power/regen, and trip data at
 60 FPS from two live sources: the car's OBD2 port and an Android
 Automotive companion app running on the head unit itself.
 
+[Version notes and upgrade instructions](CHANGELOG.md)
+
 ![Drive screen, day](ex30-companion-runner/docs/modern_ui_preview/4-drive-day.png)
 ![Drive screen, night](ex30-companion-runner/docs/modern_ui_preview/5-drive-night-braking.png)
 ![Charging screen](ex30-companion-runner/docs/modern_ui_preview/6-charging-night.png)
@@ -196,9 +198,9 @@ reverse-engineered into a data source:
 
 ## Getting the AAOS app
 
-The EX30 Companion app is distributed through **Google Play** (it must
-be — AAOS head units don't allow sideloading). The current release is
-**v1.0.1**, in **closed testing**.
+The EX30 Companion app is distributed through the **Google Play closed testing
+track**. To see what changed in your build and how to set it up, read the
+[Companion version notes](CHANGELOG.md).
 
 **To join**: open an issue on this repository (or contact
 [@ifmeidan](https://github.com/ifmeidan)) with the Google account email
