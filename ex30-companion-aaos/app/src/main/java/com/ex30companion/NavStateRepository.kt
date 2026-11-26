@@ -113,11 +113,13 @@ object NavNotificationParser {
     )
 
     private val ROUTE_SUMMARY_REGEX = Regex(
-        """\b(?:\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|dk|dakika|saat)|eta|remaining|kalan|trip\s+length|route\s+length|total|toplam|to\s+destination|from\s+destination|distance\s+to\s+destination|hedefe|var[ıi][şs]a)\b|\b\d{1,2}:\d{2}\b""",
+        """\b(?:\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|dk|dakika|saat)|eta|remaining|kalan|trip\s+length|route\s+length|total|toplam|(?:distance\s+)?to\s+(?:your\s+|the\s+)?destination|from\s+(?:your\s+|the\s+)?destination|hedefe|var[ıi][şs]a)\b|\b\d{1,2}:\d{2}\b""",
         RegexOption.IGNORE_CASE,
     )
 
-    private val CLAUSE_SPLIT_REGEX = Regex("""\s*(?:[·•|;\n]|\s-\s)\s*""")
+    // Split on newlines, bullet/pipe/semicolon/dash separators, and commas that
+    // are not decimal separators inside a number (e.g. "1,2 km").
+    private val CLAUSE_SPLIT_REGEX = Regex("""\s*(?:[·•|;\r\n]+|(?<!\d),|,(?!\d)|\s-\s)\s*""")
 
     private val PURE_DISTANCE_REGEX = Regex(
         """^\s*\d+(?:[.,]\d+)?\s*(?:km|m|mi|ft|yd)\s*$""",
@@ -130,10 +132,12 @@ object NavNotificationParser {
         bigText: String? = null,
         iconHint: String? = null,
     ): NavState {
-        val cleanTitle = stripRouteSummaryClauses(cleanSpace(title))
-        val cleanText = stripRouteSummaryClauses(cleanSpace(text))
-        val cleanBig = stripRouteSummaryClauses(cleanSpace(bigText))
-        val cleanHint = stripRouteSummaryClauses(cleanSpace(iconHint))
+        // Split into clauses BEFORE collapsing whitespace so newlines and commas
+        // inside a single field cleanly separate the turn cue from route summaries.
+        val cleanTitle = stripRouteSummaryClauses(title)
+        val cleanText = stripRouteSummaryClauses(text)
+        val cleanBig = stripRouteSummaryClauses(bigText)
+        val cleanHint = stripRouteSummaryClauses(iconHint)
         val body = if (cleanBig.length > cleanText.length && cleanBig.contains(cleanText, ignoreCase = true)) {
             cleanBig
         } else {
@@ -165,10 +169,10 @@ object NavNotificationParser {
         )
     }
 
-    private fun stripRouteSummaryClauses(raw: String): String {
-        if (raw.isEmpty()) return ""
+    private fun stripRouteSummaryClauses(raw: String?): String {
+        if (raw.isNullOrBlank()) return ""
         return raw.split(CLAUSE_SPLIT_REGEX)
-            .map { it.trim() }
+            .map { cleanSpace(it) }
             .filter { it.isNotEmpty() && !ROUTE_SUMMARY_REGEX.containsMatchIn(it) }
             .joinToString(" · ")
     }
@@ -224,6 +228,13 @@ object NavNotificationParser {
         val isRoundabout = hasAny("döner kavşak", "kavşağ", "kavşak", "roundabout", "rotary", "traffic circle")
         if (isRoundabout || exitNumber > 0) return "roundabout" to true
         if (hasAny("u dönüş", "u-turn", "u turn", "make a u")) return "uturn" to true
+        // Arrival cues ("Your destination is on the right/left", "Arrived") must
+        // be recognized before left/right so they don't show a turn arrow.
+        // Route summaries ("12 km to [your] destination") are already stripped
+        // by stripRouteSummaryClauses before classifyManeuver runs.
+        if (hasAny("variş", "hedef", "varacağiniz", "destination", "arrive", "arrived", "your stop")) {
+            return "destination" to true
+        }
         if (hasAny("keskin sol", "tam sol", "sharp left")) return "sharp_left" to true
         if (hasAny("keskin sağ", "tam sağ", "sharp right")) return "sharp_right" to true
         if (hasAny("hafif sol", "sola doğru", "soldan devam", "sol şeritten", "solda kal", "keep left", "bear left", "slight left", "stay left")) {
@@ -238,9 +249,6 @@ object NavNotificationParser {
         if (hasAny("sola dön", "sola", "turn left", "left")) return "turn_left" to true
         if (hasAny("sağa dön", "sağa", "turn right", "right")) return "turn_right" to true
         if (hasAny("katil", "birleş", "merge")) return "merge" to true
-        if (hasAny("variş", "hedef", "varacağiniz", "destination", "arrive", "arrived", "your stop")) {
-            return "destination" to true
-        }
         if (hasAny("düz", "devam", "ileri", "straight", "continue", "head ", "keep going")) {
             return "straight" to true
         }

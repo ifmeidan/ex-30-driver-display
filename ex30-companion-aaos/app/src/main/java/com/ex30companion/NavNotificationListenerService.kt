@@ -56,12 +56,11 @@ class NavNotificationListenerService : NotificationListenerService() {
 
         val parsed = parseNotification(sbn.notification)
         if (parsed.active) {
-            if (activeNavKey == null || activeNavKey == sbn.key) {
-                activeNavKey = sbn.key
-                NavStateRepository.update(parsed)
-            } else {
-                refreshFromActive()
-            }
+            // Live post takeover: a notification that actively posts a valid cue
+            // becomes the tracked source immediately, while periodic refreshes
+            // (refreshFromActive) stay pinned to activeNavKey until it is removed.
+            activeNavKey = sbn.key
+            NavStateRepository.update(parsed)
         } else if (sbn.key == activeNavKey) {
             refreshFromActive()
         }
@@ -180,7 +179,7 @@ class NavNotificationListenerService : NotificationListenerService() {
             }
         }
         if (v is TextView) {
-            val s = v.text?.toString()?.replace(Regex("""\s+"""), " ")?.trim().orEmpty()
+            val s = v.text?.toString()?.replace(Regex("""[^\S\r\n]+"""), " ")?.trim().orEmpty()
             if (s.isNotEmpty()) texts.add(s)
         }
         if (v is ViewGroup) {

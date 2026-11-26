@@ -9,11 +9,11 @@ import org.junit.Test
 class NavNotificationParserTest {
 
     @Test
-    fun `selector stays pinned to activeNavKey until that notification is gone`() {
+    fun `selector stays pinned to activeNavKey on refresh and switches after live post or removal`() {
         val rightTurn = NavNotificationParser.parse(title = "300 m", text = "Turn right")
         val leftTurn = NavNotificationParser.parse(title = "150 m", text = "Turn left")
-        // Even if the other notification appears first in activeNotifications,
-        // refreshing while key-right is still active must not switch to key-left.
+        // Even if an older notification ("key-left") sits first in activeNotifications,
+        // once a live post selects "key-right", periodic refresh stays pinned to "key-right".
         val candidates = listOf(
             "key-left" to leftTurn,
             "key-right" to rightTurn,
@@ -38,29 +38,48 @@ class NavNotificationParserTest {
 
     @Test
     fun `route summary to destination is ignored on its own and does not override real maneuver`() {
-        val summaryOnly = NavNotificationParser.parse(
-            title = "12 km to destination",
-            text = null,
-        )
-        assertFalse(summaryOnly.active)
-        assertEquals("none", summaryOnly.maneuver)
-        assertEquals("", summaryOnly.distance)
+        for (summary in listOf("12 km to destination", "12 km to your destination", "5 mi to the destination")) {
+            val summaryOnly = NavNotificationParser.parse(title = summary, text = null)
+            assertFalse("Expected inactive for: $summary", summaryOnly.active)
+            assertEquals("none", summaryOnly.maneuver)
+            assertEquals("", summaryOnly.distance)
+        }
 
-        val paired = NavNotificationParser.parse(
+        val pairedSeparateFields = NavNotificationParser.parse(
             title = "Turn left in 300 m",
             text = "12 km to destination",
         )
-        assertTrue(paired.active)
-        assertEquals("turn_left", paired.maneuver)
-        assertEquals("300 m", paired.distance)
+        assertTrue(pairedSeparateFields.active)
+        assertEquals("turn_left", pairedSeparateFields.maneuver)
+        assertEquals("300 m", pairedSeparateFields.distance)
 
-        val pairedSingleField = NavNotificationParser.parse(
-            title = "Turn left in 300 m · 12 km to destination",
+        // Single field separated by bullet, newline, or comma
+        for (sep in listOf(" · ", "\n", "\r\n", ", ")) {
+            val pairedSingleField = NavNotificationParser.parse(
+                title = "Turn left in 300 m${sep}12 km to destination",
+                text = null,
+            )
+            assertTrue("Expected active for separator '$sep'", pairedSingleField.active)
+            assertEquals("turn_left", pairedSingleField.maneuver)
+            assertEquals("300 m", pairedSingleField.distance)
+        }
+    }
+
+    @Test
+    fun `destination on right or left is recognized as arrival cue without turn arrow`() {
+        val destRight = NavNotificationParser.parse(
+            title = "Your destination is on the right",
             text = null,
         )
-        assertTrue(pairedSingleField.active)
-        assertEquals("turn_left", pairedSingleField.maneuver)
-        assertEquals("300 m", pairedSingleField.distance)
+        assertTrue(destRight.active)
+        assertEquals("destination", destRight.maneuver)
+
+        val destLeft = NavNotificationParser.parse(
+            title = "Your destination is on the left",
+            text = null,
+        )
+        assertTrue(destLeft.active)
+        assertEquals("destination", destLeft.maneuver)
     }
 
     @Test
