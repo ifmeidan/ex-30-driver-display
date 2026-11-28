@@ -1,31 +1,33 @@
 package com.ex30companion
 
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
-import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.security.GeneralSecurityException
 
-/** Owns the bridge's one outstanding network request. All lifecycle and callback calls run on main. */
+/** Android owns auto-join. The bridge holds Wi-Fi and selects a route on the main thread. */
 class BridgeWifi(private val context: Context, private val closeSocket: () -> Unit) {
     enum class Status {
-        IDLE, REQUESTING, WAITING_TO_RETRY, AVAILABLE, UNAVAILABLE, PERMISSION_REQUIRED,
-        WIFI_OFF, INVALID_CREDENTIAL
+        IDLE, WAKING, REQUESTING, AVAILABLE, UNAVAILABLE, PERMISSION_REQUIRED,
+        WIFI_OFF, LOCATION_REQUIRED, LOCATION_OFF, SSID_HIDDEN
     }
 
-    // Each request delivers a new route, even when Android reuses the same network ID.
     class Route(val network: Network, val host: String)
 
     private val currentRoute = MutableStateFlow<Route?>(null)
@@ -33,44 +35,53 @@ class BridgeWifi(private val context: Context, private val closeSocket: () -> Un
     private val cm = context.getSystemService(ConnectivityManager::class.java)
     private val radio = context.applicationContext.getSystemService(WifiManager::class.java)
     private val main = Handler(Looper.getMainLooper())
-    private var callback: ConnectivityManager.NetworkCallback? = null
+    private val afterWake = Runnable { request() }
+    private var observer: ConnectivityManager.NetworkCallback? = null
+    private var hold: ConnectivityManager.NetworkCallback? = null
     private var awake = false
-    private var retryIndex = 0
-    private val retry = Runnable { request(automatic = true) }
 
-    private val radioChanges = object : BroadcastReceiver() {
+    private val settingsChanges = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (!awake || isInitialStickyBroadcast) return
-            when (intent.getIntExtra(WifiManager.EXTRA_WIFI_STATE, WifiManager.WIFI_STATE_UNKNOWN)) {
-                WifiManager.WIFI_STATE_DISABLED -> {
-                    release()
-                    if (BridgeSettings.host(context) != null) state.value = Status.WIFI_OFF
+            if (!awake || isInitialStickyBroadcast || state.value == Status.WAKING) return
+            when (intent.action) {
+                WifiManager.WIFI_STATE_CHANGED_ACTION -> when (
+                    intent.getIntExtra(WifiManager.EXTRA_WIFI_STATE, WifiManager.WIFI_STATE_UNKNOWN)
+                ) {
+                    WifiManager.WIFI_STATE_DISABLED -> request()
+                    WifiManager.WIFI_STATE_ENABLED -> if (state.value == Status.WIFI_OFF) request()
                 }
-                WifiManager.WIFI_STATE_ENABLED -> if (state.value == Status.WIFI_OFF) setAwake(true)
+                LocationManager.MODE_CHANGED_ACTION -> if (BridgeSettings.ssid(context) != null) request()
             }
         }
     }
 
     fun start(active: Boolean, userInitiated: Boolean) {
-        ContextCompat.registerReceiver(
-            context, radioChanges, IntentFilter(WifiManager.WIFI_STATE_CHANGED_ACTION),
-            ContextCompat.RECEIVER_NOT_EXPORTED,
-        )
+        val filter = IntentFilter(WifiManager.WIFI_STATE_CHANGED_ACTION).apply {
+            addAction(LocationManager.MODE_CHANGED_ACTION)
+        }
+        ContextCompat.registerReceiver(context, settingsChanges, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         setAwake(active, userInitiated)
     }
 
     fun setAwake(active: Boolean, userInitiated: Boolean = false) {
+        release()
         awake = active
-        retryIndex = 0
-        request(automatic = !userInitiated)
+        if (!awake || BridgeSettings.host(context) == null) return
+        if (userInitiated) {
+            request()
+        } else {
+            state.value = Status.WAKING
+            Log.d(TAG, "Waiting 10 seconds before Wi-Fi connection")
+            main.postDelayed(afterWake, WAKE_DELAY_MS)
+        }
     }
 
     fun stop() {
-        context.unregisterReceiver(radioChanges)
+        context.unregisterReceiver(settingsChanges)
         setAwake(false)
     }
 
-    private fun request(automatic: Boolean) {
+    private fun request() {
         release()
         if (!awake) return
         val host = BridgeSettings.host(context) ?: return
@@ -78,69 +89,79 @@ class BridgeWifi(private val context: Context, private val closeSocket: () -> Un
             state.value = Status.WIFI_OFF
             return
         }
-        val wifi = try {
-            BridgeSettings.wifi(context)
-        } catch (_: GeneralSecurityException) {
-            state.value = Status.INVALID_CREDENTIAL
+        val ssid = BridgeSettings.ssid(context)
+        if (ssid != null && !canReadSsid(context)) {
+            state.value = Status.LOCATION_REQUIRED
             return
         }
-        val builder = NetworkRequest.Builder()
+        if (ssid != null && !locationEnabled(context)) {
+            state.value = Status.LOCATION_OFF
+            return
+        }
+
+        val passwordProtected = ssid != null && BridgeSettings.hasPassphrase(context)
+        val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        if (wifi != null) {
-            val specifier = WifiNetworkSpecifier.Builder().setSsid(wifi.ssid)
-            wifi.passphrase?.let { specifier.setWpa2Passphrase(it) }
-            builder.setNetworkSpecifier(specifier.build())
-        }
-        val request = builder.build()
-        val cb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                if (callback !== this) return
+            .build()
+        val flags = if (ssid == null) 0 else ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO
+        val cb = object : ConnectivityManager.NetworkCallback(flags) {
+            private val matching = linkedSetOf<Network>()
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                if (observer !== this) return
+                // The best-match callback can switch straight to a higher-ranked network
+                // without an onLost for the previous one. Host-only follows that switch.
+                if (ssid == null) matching.clear()
+                val info = caps.transportInfo as? WifiInfo
+                val reported = info?.ssid
+                val matches = ssid == null || (info != null &&
+                    matchesSavedWifi(ssid, passwordProtected, reported, info.currentSecurityType))
+                if (matches) matching.add(network) else matching.remove(network)
+                val hidden = ssid != null && (reported == null || reported == WifiManager.UNKNOWN_SSID)
+                updateRoute(if (hidden) Status.SSID_HIDDEN else Status.REQUESTING)
+            }
+
+            override fun onLost(network: Network) {
+                if (observer !== this) return
+                matching.remove(network)
+                updateRoute(Status.REQUESTING)
+            }
+
+            private fun updateRoute(waiting: Status) {
+                if (currentRoute.value?.network in matching) return
                 dropRoute()
-                // Preserve the retail EX30 Android 12L plain-Socket workaround.
+                val network = matching.firstOrNull()
+                if (network == null) {
+                    state.value = waiting
+                    return
+                }
+                // The retail EX30 Android 12L needs a process-bound plain Socket.
                 if (Build.VERSION.SDK_INT == 32 && !cm.bindProcessToNetwork(network)) {
                     state.value = Status.UNAVAILABLE
                     return
                 }
-                wifi?.let { BridgeSettings.recordConnection(context, it.ssid) }
                 currentRoute.value = Route(network, host)
                 state.value = Status.AVAILABLE
-            }
-
-            override fun onLost(network: Network) {
-                if (callback !== this || currentRoute.value?.network != network) return
-                dropRoute()
-                state.value = Status.REQUESTING
-                // An established local-only session ends when the AP disappears.
-                // Submit a fresh exact request; Android remembers approved access points.
-                if (wifi != null) setAwake(true)
-            }
-
-            override fun onUnavailable() {
-                if (callback !== this) return
-                release()
-                // Android also reports this when a previously approved Pi takes longer
-                // to boot than the system scan window. Only retry known profiles on
-                // unattended starts. A failed setup or explicit retry stays dismissed.
-                if (automatic && wifi != null && BridgeSettings.previouslyConnected(context) &&
-                    retryIndex < RETRY_DELAYS_MS.size) {
-                    state.value = Status.WAITING_TO_RETRY
-                    main.postDelayed(retry, RETRY_DELAYS_MS[retryIndex++])
-                } else {
-                    state.value = Status.UNAVAILABLE
-                }
+                Log.d(TAG, "Bridge Wi-Fi route available")
             }
         }
-        callback = cb
         state.value = Status.REQUESTING
         try {
-            try {
-                cm.requestNetwork(request, cb, main)
-            } catch (e: SecurityException) {
-                if (wifi != null) throw e
-                // OEMs that deny an active generic request can still report the
-                // Wi-Fi the driver joined manually in the original host-only setup.
+            if (ssid == null) {
+                cm.registerBestMatchingNetworkCallback(request, cb, main)
+            } else {
+                // The named Pi can be an unvalidated, non-default Wi-Fi network.
                 cm.registerNetworkCallback(request, cb, main)
+            }
+            observer = cb
+            Log.d(TAG, "Watching for bridge Wi-Fi")
+            val keepWifi = ConnectivityManager.NetworkCallback()
+            try {
+                cm.requestNetwork(request, keepWifi, main)
+                hold = keepWifi
+            } catch (_: SecurityException) {
+                // Some OEMs allow only passive observation. Keep the listener.
             }
         } catch (_: SecurityException) {
             release()
@@ -159,23 +180,43 @@ class BridgeWifi(private val context: Context, private val closeSocket: () -> Un
     }
 
     private fun release() {
-        main.removeCallbacks(retry)
-        val previous = callback
-        callback = null
+        main.removeCallbacks(afterWake)
+        val registered = listOfNotNull(observer, hold)
+        observer = null
+        hold = null
         dropRoute()
-        if (previous != null) {
+        for (cb in registered) {
             try {
-                cm.unregisterNetworkCallback(previous)
+                cm.unregisterNetworkCallback(cb)
             } catch (_: IllegalArgumentException) {
-                // An unavailable request may already have been removed by Android.
+                // Android may already have released the request.
             }
         }
         state.value = Status.IDLE
     }
 
     companion object {
-        private val RETRY_DELAYS_MS = longArrayOf(10_000L, 30_000L, 60_000L)
+        private const val TAG = "BridgeWifi"
+        private const val WAKE_DELAY_MS = 10_000L
         private val state = MutableStateFlow(Status.IDLE)
         val status = state.asStateFlow()
+
+        fun canReadSsid(context: Context): Boolean =
+            listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_BACKGROUND_LOCATION).all {
+                ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+            }
+
+        fun locationEnabled(context: Context): Boolean =
+            context.getSystemService(LocationManager::class.java)?.isLocationEnabled == true
+    }
+}
+
+// WifiInfo quotes UTF-8 SSIDs. The unquoted unknown sentinel and redacted security types must fail closed.
+internal fun matchesSavedWifi(ssid: String, passwordProtected: Boolean, reported: String?, securityType: Int): Boolean {
+    if (reported != "\"$ssid\"") return false
+    return if (passwordProtected) {
+        securityType == WifiInfo.SECURITY_TYPE_PSK || securityType == WifiInfo.SECURITY_TYPE_SAE
+    } else {
+        securityType == WifiInfo.SECURITY_TYPE_OPEN || securityType == WifiInfo.SECURITY_TYPE_OWE
     }
 }

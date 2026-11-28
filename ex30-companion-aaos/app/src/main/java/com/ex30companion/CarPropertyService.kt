@@ -43,6 +43,7 @@ class CarPropertyService(private val context: Context) {
     fun setParked(nowParked: Boolean) {
         if (nowParked == parked) return
         parked = nowParked
+        if (nowParked) VehicleStateRepository.clearParkingSignals()
         val mgr = manager ?: return
         for (entry in PropertyCatalog.entries) {
             if (entry.propertyId in KEEP_WHILE_PARKED) continue
@@ -61,6 +62,7 @@ class CarPropertyService(private val context: Context) {
         try { car?.disconnect() } catch (_: Throwable) {}
         car = null
         manager = null
+        VehicleStateRepository.clearParkingSignals()
     }
 
     private fun register(mgr: CarPropertyManager, entry: PropertyCatalog.Entry) {
@@ -69,7 +71,7 @@ class CarPropertyService(private val context: Context) {
         val granted = ContextCompat.checkSelfPermission(context, entry.permission) ==
             PackageManager.PERMISSION_GRANTED
         if (!granted) {
-            VehicleStateRepository.update(
+            VehicleStateRepository.updateFromVehicle(
                 entry.propertyId,
                 PropertySample(
                     status = PropertyStatus.PERMISSION_DENIED,
@@ -86,7 +88,7 @@ class CarPropertyService(private val context: Context) {
             null
         }
         if (config == null) {
-            VehicleStateRepository.update(
+            VehicleStateRepository.updateFromVehicle(
                 entry.propertyId,
                 PropertySample(
                     status = PropertyStatus.NOT_SUPPORTED,
@@ -103,7 +105,7 @@ class CarPropertyService(private val context: Context) {
         if (config.changeMode == CarPropertyConfig.VEHICLE_PROPERTY_CHANGE_MODE_STATIC) {
             try {
                 val v = mgr.getProperty<Any>(entry.propertyId, 0)
-                VehicleStateRepository.update(
+                VehicleStateRepository.updateFromVehicle(
                     entry.propertyId,
                     PropertySample(
                         value = v.value,
@@ -112,7 +114,7 @@ class CarPropertyService(private val context: Context) {
                     ),
                 )
             } catch (t: Throwable) {
-                VehicleStateRepository.update(
+                VehicleStateRepository.updateFromVehicle(
                     entry.propertyId,
                     PropertySample(
                         status = PropertyStatus.ERROR,
@@ -136,7 +138,7 @@ class CarPropertyService(private val context: Context) {
         val ok = try {
             mgr.registerCallback(callback, entry.propertyId, rate)
         } catch (t: Throwable) {
-            VehicleStateRepository.update(
+            VehicleStateRepository.updateFromVehicle(
                 entry.propertyId,
                 PropertySample(
                     status = PropertyStatus.ERROR,
@@ -147,7 +149,7 @@ class CarPropertyService(private val context: Context) {
             return
         }
         if (!ok) {
-            VehicleStateRepository.update(
+            VehicleStateRepository.updateFromVehicle(
                 entry.propertyId,
                 PropertySample(
                     status = PropertyStatus.ERROR,
@@ -160,18 +162,20 @@ class CarPropertyService(private val context: Context) {
 
     private val callback = object : CarPropertyManager.CarPropertyEventCallback {
         override fun onChangeEvent(value: CarPropertyValue<*>) {
-            VehicleStateRepository.update(
+            if (manager == null || (parked && value.propertyId !in KEEP_WHILE_PARKED)) return
+            val available = value.status == CarPropertyValue.STATUS_AVAILABLE
+            VehicleStateRepository.updateFromVehicle(
                 value.propertyId,
                 PropertySample(
-                    value = value.value,
+                    value = if (available) value.value else null,
                     timestampMs = System.currentTimeMillis(),
-                    status = PropertyStatus.OK,
+                    status = if (available) PropertyStatus.OK else PropertyStatus.ERROR,
                 ),
             )
         }
 
         override fun onErrorEvent(propId: Int, zone: Int) {
-            VehicleStateRepository.update(
+            VehicleStateRepository.updateFromVehicle(
                 propId,
                 PropertySample(
                     status = PropertyStatus.ERROR,

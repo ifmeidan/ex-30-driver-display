@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="nav_debug">Nav Debug</string>
+    <string name="nav_debug_history_title">Navigation history</string>
+    <string name="nav_debug_back">Back</string>
+    <string name="nav_debug_clear">Clear history</string>
+    <string name="nav_debug_record">Record navigation on this device</string>
+    <string name="nav_debug_empty">No recorded navigation events.</string>
+    <string name="nav_debug_distance_only">Distance only · %1$s</string>
+    <string name="nav_debug_missing_distance">Distance unavailable</string>
+    <string name="nav_debug_uturn">U-turn</string>
+    <string name="nav_debug_unreadable">Guidance not recognized</string>
+    <string name="nav_debug_final_unreadable">Final update · Arrival unreadable</string>
+    <string name="nav_debug_ended">Guidance ended</string>
+    <string name="nav_debug_exit">Exit %1$d</string>
+    <string name="nav_debug_destination">Destination</string>
+    <string name="nav_debug_destination_left">Destination on the left</string>
+    <string name="nav_debug_destination_right">Destination on the right</string>
+    <string name="nav_debug_fields">Notification fields · %1$s</string>
+    <string name="nav_debug_no_fields">No guidance fields available</string>
+</resources>

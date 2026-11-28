@@ -95,8 +95,8 @@ If the Pi receives no `state` or `heartbeat` for 15s, it marks AAOS source as
 ### `nav` — experimental opt-in turn-by-turn maneuver update
 
 Emitted **only** when the user explicitly enables the `Nav` opt-in toggle in the
-AAOS app and grants notification listener access, and only for ongoing navigation
-guidance notifications from Google Maps (`com.google.android.apps.maps`). Kept
+AAOS app and grants notification listener access, for ongoing navigation
+guidance from Google Maps (`com.google.android.apps.maps`) and its final update. Kept
 strictly separate from `state` vehicle telemetry, vehicle `heartbeat` scheduling,
 and wall-clock sync.
 
@@ -126,6 +126,11 @@ and wall-clock sync.
   - Pre-filtered to ongoing navigation guidance notifications from
     `com.google.android.apps.maps` (group summaries and non-guidance categories
     are rejected before content inspection).
+    A dismissible update to the tracked notification can publish an explicit
+    arrival once. Removal clears guidance. A bitmap arrow can supply a cue only
+    when it exactly matches a single maneuver among named bitmap drawables in
+    the installed Maps package, at the same size and color. Unrecognized,
+    opaque, multicolor or ambiguous images leave the maneuver unknown.
   - `maneuver` is a closed enum (`straight`, `turn_left`, `turn_right`,
     `slight_left`, `slight_right`, `sharp_left`, `sharp_right`, `uturn`,
     `roundabout`, `merge`, `exit_left`, `exit_right`, `destination`, `none`).
@@ -138,8 +143,11 @@ and wall-clock sync.
     the destination is on.
   - `exit` (`1..9`, or `0`) is populated only for `roundabout` maneuvers.
 - **Reconnect, renewal & timeout contract:**
-  - Sender uses a single conflated slot for `nav` frames (no queued history of
-    old turns). On connect/reconnect, immediately after `hello`, the sender
+  - The sender coalesces turn updates. If Maps removes an explicit arrival
+    before the connected writer delivers it, the writer sends that arrival
+    once, followed by the current cue from any remaining eligible Maps route
+    or an inactive frame when guidance has ended. Opt-out discards any pending arrival.
+    On connect/reconnect, immediately after `hello`, the sender
     revalidates live `activeNotifications` and sends only the single latest
     validated state (including `active: false` when no route is active).
   - While a cue is active, the sender revalidates against live
@@ -155,6 +163,15 @@ and wall-clock sync.
   - Passing `--aaos-nav-diag` (`nav_diag=True`, default `False`) on the Pi logs
     only sanitized state transitions (`nav state: active=True maneuver=... distance=... arrival=... exit=...`)
     and clear reasons (`nav cleared: reason=...`).
+  - With Nav enabled, the parked **Nav Debug** screen can separately enable
+    recording on the head unit. It retains the latest 500 local guidance and
+    diagnostic events for review after the drive. The history works offline
+    and adds no fields or messages to the bridge protocol.
+  - For on-device diagnosis, enable `adb shell setprop log.tag.Ex30Nav DEBUG`
+    and read `adb logcat -s Ex30Nav:D`. The listener logs canonical cues from
+    accepted posts even while the bridge is disconnected. For unknown maneuvers
+    it logs which fields exist and the Android icon types, with no notification
+    text. Set the tag to `INFO` to turn this off.
 
 ### `goodbye` — clean disconnect (best effort)
 
@@ -190,10 +207,9 @@ send `goodbye` with a `parked_*` reason, close the socket, release the
 WiFi network request, and unsubscribe every VHAL property except
 IGNITION_STATE and EV_CHARGE_PORT_CONNECTED.
 
-Exit parked on ignition ON/START, screen on, or charge-port connect:
-re-request WiFi, reconnect, and reseed the full snapshot (standard
-`hello` + seed flow — the Pi needs no new logic beyond reacting to the
-ignition field, which it already does).
+Ignition ON/START, screen on, or charge-port connection can wake the bridge.
+After ten seconds it requests Wi-Fi in the background. Once the configured
+link is available it reconnects and sends `hello` and a fresh snapshot.
 
 ---
 

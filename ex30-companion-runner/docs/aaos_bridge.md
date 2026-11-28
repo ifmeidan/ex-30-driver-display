@@ -147,8 +147,8 @@ Off by default on both ends. To test in a parked car or on the bench:
      `/etc/systemd/system/driver-display.service` (e.g.
      `ExecStart=/usr/bin/cage -- /path/to/scripts/launch.sh --aaos-nav`).
 3. **Isolation & privacy:**
-   - Only ongoing navigation guidance notifications from Google Maps
-     (`com.google.android.apps.maps`) are read.
+   - AAOS reads ongoing guidance from Google Maps (`com.google.android.apps.maps`)
+     and checks a final update to the tracked notification for an explicit arrival.
    - `nav` frames never write to `logs/aaos_bridge_YYYYMMDD.jsonl` or
      `DriveLogger` CSVs, never trigger wall-clock sync, and never refresh
      vehicle telemetry staleness (`aaos_stale`).
@@ -206,10 +206,10 @@ Pi's AP IP. OBD link is Bluetooth so the WiFi radio is free.
 - `connection.autoconnect-priority 100` so the AP wins over any
   remembered client SSIDs at boot.
 
-The companion app requests the configured SSID as a local WiFi network
-and opens the bridge socket on the network Android supplies. This works
-with an internet-less AP while cellular is the default route. Leave the
-SSID empty to use a WiFi network joined manually in car settings.
+Save the Pi network in the head unit's Wi-Fi settings and enable auto-connect.
+Ten seconds after startup or wake, Companion starts watching the available
+Wi-Fi links. With a named profile, it opens the bridge socket when the joined
+SSID matches. Leave the SSID empty to use Wi-Fi selected manually in car settings.
 
 If the head unit ever refuses to keep an internet-less network up
 despite the user tapping "Stay connected," the fallback would be a tiny

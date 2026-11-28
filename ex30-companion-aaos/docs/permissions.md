@@ -25,6 +25,10 @@ constants used in `properties.md`; the snippet mirrors the app's actual
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+<!-- Optional named Wi-Fi profile: identify the joined SSID while the activity is closed. -->
+<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
 <!-- Foreground bridge service + its mandatory status notification -->
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -48,15 +52,18 @@ constants used in `properties.md`; the snippet mirrors the app's actual
 | `CAR_ENERGY` | Dangerous | runtime | SoC, range, battery temp/capacity, charge state/time/limits/draw, regen state |
 | `CAR_SPEED` | Dangerous | runtime | speed (raw + display-calibrated) |
 
-## WiFi connection approval
+## Wi-Fi setup and SSID access
 
-When the user supplies a WiFi name, the foreground bridge service requests that
-exact network from Android with `WifiNetworkSpecifier` and the existing
-install-time `CHANGE_NETWORK_STATE` permission. The user approves the
-access point in Android's network dialog. Android can reuse this approval on a
-later request. If WiFi is off, the user can open system settings from Companion
-and turn it on. With no WiFi name configured, the app uses the network selected
-by the user in car settings.
+During setup the driver saves the named network in Android. The system can
+then auto-join it on subsequent drives. The bridge waits ten seconds at startup
+or wake and checks the joined SSID before using a named profile. Permission
+prompts and settings screens are confined to manual setup.
+
+Android classifies the SSID as location-sensitive. A named profile requires
+device Location and precise location access, including background access for
+unattended operation. The app uses the permission to compare network names.
+Host-only setups use the Wi-Fi selected by the driver and need no location
+grant. If the radio is off, the driver can enable it in car settings.
 
 ## Runtime permission request flow
 
