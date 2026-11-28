@@ -166,24 +166,16 @@ class NavNotificationParserTest {
         val oldCue = NavNotificationParser.parse(title = "500 m", text = "Turn left")
         val liveMapsCue = NavNotificationParser.parse(title = "300 m", text = "Turn right")
 
-        assertTrue(NavNotificationSelector.shouldAcceptPost("key-old", oldCue, setOf("key-old")))
+        assertTrue(NavNotificationSelector.shouldAcceptPost("key-old"))
         assertEquals("key-old", NavNotificationSelector.currentTrackedKey())
 
         assertTrue(
-            NavNotificationSelector.shouldAcceptPost(
-                "key-maps",
-                liveMapsCue,
-                setOf("key-old", "key-maps"),
-            ),
+            NavNotificationSelector.shouldAcceptPost("key-maps"),
         )
         assertEquals("key-maps", NavNotificationSelector.currentTrackedKey())
 
         assertFalse(
-            NavNotificationSelector.shouldAcceptPost(
-                "key-old",
-                oldCue,
-                setOf("key-old", "key-maps"),
-            ),
+            NavNotificationSelector.shouldAcceptPost("key-old"),
         )
         assertEquals("key-maps", NavNotificationSelector.currentTrackedKey())
 
@@ -192,6 +184,7 @@ class NavNotificationParserTest {
         assertEquals("key-maps", keptKey)
         assertEquals("turn_right", keptState.maneuver)
 
+        NavNotificationSelector.remove("key-maps")
         val (fallbackKey, fallbackState) = NavNotificationSelector.selectActive(listOf("key-old" to oldCue))
         assertEquals("key-old", fallbackKey)
         assertEquals("turn_left", fallbackState.maneuver)
@@ -199,6 +192,81 @@ class NavNotificationParserTest {
         val (emptyKey, emptyState) = NavNotificationSelector.selectActive(emptyList())
         assertNull(emptyKey)
         assertFalse(emptyState.active)
+    }
+
+    @Test
+    fun `unreadable ongoing key owns a dismissible final during callback and refresh interleaving`() {
+        val older = "earlier Maps guidance"
+        val route = "current Maps guidance"
+        val oldCue = NavState(true, "turn_right")
+        val unreadable = NavState()
+        val arrival = NavState(true, "destination", arrival = "destination_left")
+        assertTrue(NavNotificationSelector.shouldAcceptPost(older))
+        assertTrue(NavNotificationSelector.shouldAcceptPost(route))
+        assertEquals(route to unreadable, NavNotificationSelector.selectActive(listOf(older to oldCue, route to unreadable)))
+
+        // The system snapshot contains the replacement before onNotificationPosted runs.
+        val olderStillOngoing = listOf(older to oldCue)
+        val replacements = setOf(route, "unrelated dismissible Maps post")
+        assertEquals(route to unreadable, NavNotificationSelector.selectActive(olderStillOngoing, replacements))
+        // The framework has already removed it, but the ordered post and removal
+        // callbacks have not reached the listener yet. Even several snapshots must clear
+        // the live cue without handing final ownership to an older active key.
+        assertEquals(null to unreadable, NavNotificationSelector.selectActive(emptyList()))
+        assertEquals(null to unreadable, NavNotificationSelector.selectActive(olderStillOngoing))
+        assertFalse(NavNotificationSelector.shouldAcceptPost(older))
+        assertFalse(NavNotificationSelector.canReadFinal(older))
+        assertFalse(NavNotificationSelector.consumeFinal("unrelated dismissible Maps post"))
+        assertTrue(NavNotificationSelector.canReadFinal(route))
+        assertTrue(NavNotificationSelector.consumeFinal(route))
+        NavStateRepository.update(arrival)
+
+        // A persistent terminal notification never renews the cue. Duplicate callbacks
+        // cannot republish it, and repeated clears preserve a coalesced terminal transition.
+        var cleared: VersionedNavState? = null
+        repeat(2) {
+            val (_, state) = NavNotificationSelector.selectActive(olderStillOngoing, replacements)
+            assertFalse(state.active)
+            cleared = NavStateRepository.applyRefreshIfUnchanged(NavStateRepository.currentSeq(), state)
+            assertEquals(arrival, cleared!!.arrivalBeforeRemoval)
+            assertFalse(NavNotificationSelector.consumeFinal(route))
+        }
+        assertEquals(cleared, NavStateRepository.currentVersioned())
+
+        NavNotificationSelector.remove(route)
+        assertFalse(NavNotificationSelector.canReadFinal(route))
+        assertEquals(older to oldCue, NavNotificationSelector.selectActive(olderStillOngoing, replacements))
+        assertFalse(NavNotificationSelector.consumeFinal(route))
+    }
+
+    @Test
+    fun `unreadable guidance found on refresh can finish and removal revokes eligibility`() {
+        val key = "maps"
+        assertEquals(key to NavState(), NavNotificationSelector.selectActive(listOf(key to NavState())))
+        assertTrue(NavNotificationSelector.canReadFinal(key))
+        NavNotificationSelector.remove(key)
+        assertFalse(NavNotificationSelector.consumeFinal(key))
+        assertEquals(null to NavState(), NavNotificationSelector.selectActive(emptyList(), setOf(key)))
+        assertTrue(NavNotificationSelector.shouldAcceptPost(key))
+        assertTrue(NavNotificationSelector.consumeFinal(key))
+        NavNotificationSelector.reset()
+        assertFalse(NavNotificationSelector.canReadFinal(key))
+    }
+
+    @Test
+    fun `rendered summary distances cannot become step distances and an independent primary distance survives`() {
+        assertEquals(NavState(true, "turn_right"), NavNotificationParser.parse(
+            title = "Turn right", text = null, subText = "12 km", renderedTexts = listOf("12 km"),
+        ))
+        assertEquals(NavState(true, "turn_right"), NavNotificationParser.parse(
+            title = "Turn right", text = null, summaryText = "17 min • 12 km", renderedTexts = listOf("12\u00a0km"),
+        ))
+        assertEquals(NavState(true, "turn_right", "12 km"), NavNotificationParser.parse(
+            title = "12 km", text = "Turn right", subText = "12 km", renderedTexts = listOf("12 km"),
+        ))
+        assertEquals(NavState(true, "turn_right", "50 m"), NavNotificationParser.parse(
+            title = "Turn right", text = null, subText = "12 km", renderedTexts = listOf("50 m", "12 km"),
+        ))
     }
 
     @Test
@@ -319,6 +387,19 @@ class NavNotificationParserTest {
             assertTrue(publisher.stageChange(NavStateRepository.update(actual), optedIn = true))
             assertEquals(NavFramePublisher.buildFrameJson(wanted, 1000L), publisher.pollLine())
         }
+    }
+
+    @Test
+    fun `conflicts between resource names or matched bitmaps keep only the verified distance`() {
+        val distance = NavState(true, distance = "100 m")
+        val left = distance.copy(maneuver = "turn_left")
+        val right = distance.copy(maneuver = "turn_right")
+        assertEquals(distance, NavNotificationParser.resolveManeuverIcons(
+            distance, listOf("ic_turn_right", "ic_turn_left"), emptyList(),
+        ))
+        assertEquals(distance, NavNotificationParser.resolveManeuverIcons(distance, listOf("ic_turn_left"), listOf(right)))
+        assertEquals(distance, NavNotificationParser.resolveManeuverIcons(distance, emptyList(), listOf(right, left)))
+        assertEquals(left, NavNotificationParser.resolveManeuverIcons(distance, listOf("ic_turn_left"), listOf(left)))
     }
 
     @Test

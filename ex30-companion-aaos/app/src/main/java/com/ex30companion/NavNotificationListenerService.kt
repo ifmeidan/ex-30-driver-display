@@ -67,36 +67,25 @@ class NavNotificationListenerService : NotificationListenerService() {
                 NavStateRepository.clear()
                 return
             }
-            // Filter source package and guidance flags BEFORE reading content.
-            if (!isEligibleGoogleMapsGuidance(sbn)) {
-                if (sbn.key == NavNotificationSelector.currentTrackedKey()) {
-                    // Maps can replace the very same guidance notification with a
-                    // dismissible arrival. It is a final post, never a renewable cue.
-                    if (isMapsNavigationPost(sbn.packageName, sbn.notification.flags, sbn.notification.category)) {
-                        val finalCue = parseNotification(sbn.notification, diagnose = true, finalUpdate = true)
-                        if (finalCue.cue.maneuver == "destination" && finalCue.cue.arrival != "none") {
-                            publishCue(sbn.key, finalCue)
-                            return
-                        }
-                        NavDebugHistory.observe(this, sbn.key, finalCue.cue, finalCue.sources, finalUpdate = true)
-                    }
-                    refreshFromActiveLocked()
+            if (isEligibleGoogleMapsGuidance(sbn)) {
+                // Even an unreadable step establishes ownership of this route key.
+                if (NavNotificationSelector.shouldAcceptPost(sbn.key)) {
+                    publishCue(sbn.key, parseNotification(sbn.notification, diagnose = true))
                 }
                 return
             }
-
-            val parsed = parseNotification(sbn.notification, diagnose = true)
-            val activeKeys = currentEligibleKeysOrNull()
-            if (parsed.cue.active) {
-                if (NavNotificationSelector.shouldAcceptPost(sbn.key, parsed.cue, activeKeys)) {
-                    publishCue(sbn.key, parsed)
-                }
+            if (sbn.key != NavNotificationSelector.currentTrackedKey()) return
+            if (!isMapsNavigationPost(sbn.packageName, sbn.notification.flags, sbn.notification.category)) {
+                refreshFromActiveLocked()
+                return
+            }
+            if (!NavNotificationSelector.canReadFinal(sbn.key)) return
+            val final = parseNotification(sbn.notification, diagnose = true, finalUpdate = true)
+            if (final.cue.maneuver == "destination" && final.cue.arrival != "none") {
+                if (NavNotificationSelector.consumeFinal(sbn.key)) publishCue(sbn.key, final)
             } else {
-                val tracked = NavNotificationSelector.currentTrackedKey()
-                if (tracked == null || sbn.key == tracked) {
-                    NavDebugHistory.observe(this, sbn.key, parsed.cue, parsed.sources)
-                }
-                if (sbn.key == tracked) refreshFromActiveLocked()
+                NavDebugHistory.observe(this, sbn.key, final.cue, final.sources, finalUpdate = true)
+                refreshFromActiveLocked()
             }
         }
     }
@@ -109,10 +98,9 @@ class NavNotificationListenerService : NotificationListenerService() {
                 NavStateRepository.clear()
                 return
             }
-            if (sbn.key == NavNotificationSelector.currentTrackedKey() ||
-                sbn.packageName == NavNotificationSelector.GOOGLE_MAPS_PACKAGE
-            ) {
-                refreshFromActiveLocked()
+            if (sbn.packageName == NavNotificationSelector.GOOGLE_MAPS_PACKAGE) {
+                val removedOwner = NavNotificationSelector.remove(sbn.key)
+                refreshFromActiveLocked(removedKey = sbn.key, trackedKeyRemoved = removedOwner)
             }
         }
     }
@@ -123,7 +111,7 @@ class NavNotificationListenerService : NotificationListenerService() {
         }
     }
 
-    private fun refreshFromActiveLocked() {
+    private fun refreshFromActiveLocked(removedKey: String? = null, trackedKeyRemoved: Boolean = false) {
         if (!isOptedInAndPermitted()) {
             NavNotificationSelector.reset()
             NavStateRepository.clear()
@@ -141,34 +129,32 @@ class NavNotificationListenerService : NotificationListenerService() {
             return
         }
 
-        val eligible = active.filter(::isEligibleGoogleMapsGuidance)
-        val parsed = eligible.associate { it.key to parseNotification(it.notification) }
-        val (selectedKey, selectedState) = NavNotificationSelector.selectActive(parsed.map { it.key to it.value.cue })
+        // A removal callback is authoritative even if the binder snapshot still
+        // contains that key. Dismissible entries are inspected only as metadata.
+        val mapsGuidance = active.filter { sbn ->
+            sbn.key != removedKey &&
+                isMapsNavigationPost(sbn.packageName, sbn.notification.flags, sbn.notification.category)
+        }
+        val (eligible, replacements) = mapsGuidance.partition(::isEligibleGoogleMapsGuidance)
+        val parsed = eligible.sortedBy { it.postTime }.associate { it.key to parseNotification(it.notification) }
+        val (selectedKey, selectedState) = NavNotificationSelector.selectActive(
+            parsed.map { it.key to it.value.cue }, replacements.mapTo(mutableSetOf()) { it.key },
+        )
         if (!isOptedInAndPermitted()) {
             NavNotificationSelector.reset()
             NavStateRepository.clear()
             return
         }
-        if (NavStateRepository.applyRefreshIfUnchanged(seqBefore, selectedState) != null) {
+        if (NavStateRepository.applyRefreshIfUnchanged(seqBefore, selectedState, trackedKeyRemoved) != null) {
             // Also catch a route already underway when the listener binds or debug is
             // enabled. The history suppresses renewals with the same key and outcome.
-            val key = selectedKey ?: eligible.maxByOrNull { it.postTime }?.key
-            if (key != null) {
-                val result = parsed.getValue(key)
-                NavDebugHistory.observe(this, key, result.cue, result.sources)
-            } else {
+            val result = parsed[selectedKey]
+            if (selectedKey != null && result != null) {
+                NavDebugHistory.observe(this, selectedKey, result.cue, result.sources)
+            } else if (NavNotificationSelector.currentTrackedKey()?.let(NavNotificationSelector::canReadFinal) != true) {
                 NavDebugHistory.ended(this)
             }
         }
-    }
-
-    private fun currentEligibleKeysOrNull(): Set<String>? = try {
-        activeNotifications
-            ?.filter { isEligibleGoogleMapsGuidance(it) }
-            ?.map { it.key }
-            ?.toSet()
-    } catch (_: Throwable) {
-        null
     }
 
     private fun isOptedInAndPermitted(): Boolean =
@@ -208,7 +194,6 @@ class NavNotificationListenerService : NotificationListenerService() {
             bigText = buildList {
                 extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.let { add(it) }
                 extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)?.let { addAll(it) }
-                addAll(rvStrings)
                 notification.tickerText?.let { add(it) }
             }.joinToString("\n"),
             iconHint = buildList {
@@ -216,6 +201,8 @@ class NavNotificationListenerService : NotificationListenerService() {
                 extras.getCharSequence(Notification.EXTRA_PICTURE_CONTENT_DESCRIPTION)?.let { add(it.toString()) }
             }.joinToString("\n"),
             subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString(),
+            renderedTexts = rvStrings,
+            summaryText = extras.getCharSequence(Notification.EXTRA_SUMMARY_TEXT)?.toString(),
         )
         val parsed = if (cue.maneuver == "none") withManeuverIcon(cue, notification, car, rvData.bitmaps) else cue
         val logShape = diagnose && Log.isLoggable(TAG, Log.DEBUG)
@@ -269,7 +256,7 @@ class NavNotificationListenerService : NotificationListenerService() {
             car?.largeIcon?.let { add(it) }
             bitmapIcon(largeIcon)?.let { add(it) }
             addAll(remoteBitmaps)
-            if (largeIcon == null && car?.largeIcon == null) bitmapIcon(notification.smallIcon)?.let { add(it) }
+            bitmapIcon(notification.smallIcon)?.let { add(it) }
         }
         if (resIds.isEmpty() && bitmaps.isEmpty()) return cue
         val resources = try {
@@ -277,29 +264,25 @@ class NavNotificationListenerService : NotificationListenerService() {
         } catch (_: PackageManager.NameNotFoundException) {
             return cue
         }
-        for (resId in resIds) {
-            val name = try {
+        val names = resIds.mapNotNull { resId ->
+            try {
                 resources.getResourceEntryName(resId)
             } catch (_: Resources.NotFoundException) {
-                continue
+                null
             }
-            NavNotificationParser.withManeuverIcon(cue, name)?.let { return it }
         }
         val pkg = NavNotificationSelector.GOOGLE_MAPS_PACKAGE
-        var matched: NavState? = null
-        for (bitmap in bitmaps) {
-            val candidate = NavManeuverBitmap.match(cue, bitmap) { name ->
+        val bitmapMatches = bitmaps.mapNotNull { bitmap ->
+            NavManeuverBitmap.match(cue, bitmap) { name ->
                 val id = resources.getIdentifier(name, "drawable", pkg)
                 if (id == 0) null else try {
                     (resources.getDrawable(id, null) as? BitmapDrawable)?.bitmap
                 } catch (_: Resources.NotFoundException) {
                     null
                 }
-            } ?: continue
-            if (matched != null && matched != candidate) return cue
-            matched = candidate
+            }
         }
-        return matched ?: cue
+        return NavNotificationParser.resolveManeuverIcons(cue, names, bitmapMatches)
     }
 
     private fun bitmapIcon(icon: Icon?): Bitmap? =

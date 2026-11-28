@@ -1,8 +1,23 @@
 # EX30 Driver Display version notes
 
-Each entry covers one commit on `main` since the first closed-test snapshot. Under **AAOS**, find the Companion app version, its Android build number and the Android version it targets. All listed builds support Android Automotive 12L (API 32) and later. Under **Raspberry Pi runner**, use the commit link to identify the corresponding Pi software. Dates are commit dates. Google Play rollout dates appear where confirmed.
+This history covers Companion builds and Raspberry Pi runner changes since the first closed-test snapshot. All listed builds support Android Automotive 12L (API 32) and later. Google Play rollout dates appear where confirmed.
 
 To check your installed Companion version, open **Settings → Apps → EX30 Companion** on the head unit.
+
+## 28 November 2026 · Quiet Wi-Fi reconnect and parked navigation history
+
+[Pull request #12](https://github.com/ifmeidan/ex-30-driver-display/pull/12)
+
+### AAOS · Companion 1.0.8 (build 22) · targets Android 15
+
+- The bridge waits ten seconds after startup or wake, then connects in the background when Android joins the saved Pi network. For a named profile, it checks both the SSID and Wi-Fi security type. Wi-Fi must be enabled in car settings.
+- Existing Pi settings carry over from 1.0.7. While parked, grant precise location access **Allow all the time** so Companion can verify the SSID in the background. Host-only setups can continue with the network selected in car settings. [Wi-Fi setup](SETUP.md#7-configure-the-app-one-time-while-parked)
+- Google Maps guidance now uses more of the notification’s text and maneuver icons. Conflicting icon directions leave the maneuver unreadable, and a duplicated trip distance is excluded from the turn distance. An explicit arrival can reach the Pi after an unreadable cue or when Maps immediately removes its notification.
+- To diagnose a drive, turn on **Nav → Nav Debug → Record navigation on this device** while parked. After parking, scroll through the latest 500 local events, including unreadable maneuvers and final updates without a recognized arrival. History survives an app restart and can be cleared on the head unit. [Navigation history](SETUP.md#review-navigation-after-a-drive)
+
+### Raspberry Pi runner
+
+The receiver protocol stays compatible. Existing Pi installations can use this Companion build without a runner update. The access-point installer and setup guide now describe Android's saved-network flow.
 
 ## 27 November 2026 · Version history published on GitHub
 

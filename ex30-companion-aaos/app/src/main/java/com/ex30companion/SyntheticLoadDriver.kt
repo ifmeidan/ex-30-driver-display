@@ -56,7 +56,7 @@ object SyntheticLoadDriver {
         var ignition = 4                    // ON
 
         // STATIC field — emitted once at start so the seed snapshot includes it.
-        VehicleStateRepository.update(
+        VehicleStateRepository.updateFromSimulator(
             VehiclePropertyIds.INFO_EV_BATTERY_CAPACITY,
             PropertySample(64_000f, System.currentTimeMillis(), PropertyStatus.OK)
         )
@@ -108,7 +108,7 @@ object SyntheticLoadDriver {
     }
 
     private fun push(propertyId: Int, value: Any, tsMs: Long) {
-        VehicleStateRepository.update(
+        VehicleStateRepository.updateFromSimulator(
             propertyId,
             PropertySample(value, tsMs, PropertyStatus.OK, detail = "synthetic")
         )

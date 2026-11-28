@@ -24,8 +24,9 @@ data class NavState(
 data class VersionedNavState(
     val seq: Long = 0L,
     val state: NavState = NavState(),
-    // Only a live, permitted refresh that observes the end of guidance sets this.
+    // A live refresh can observe a clear or a direct fallback after removal.
     val arrivalBeforeRemoval: NavState? = null,
+    val removedArrivalSeq: Long = -1L,
 )
 
 object NavStateRepository {
@@ -83,18 +84,25 @@ object NavStateRepository {
      * Applies a refresh result only if no newer callback or clear has occurred
      * since [expectedSeq] was captured at the start of the refresh.
      */
-    fun applyRefreshIfUnchanged(expectedSeq: Long, state: NavState): VersionedNavState? = synchronized(lock) {
+    fun applyRefreshIfUnchanged(
+        expectedSeq: Long, state: NavState, trackedKeyRemoved: Boolean = false,
+    ): VersionedNavState? = synchronized(lock) {
         if (mutationSeq != expectedSeq) {
             null
         } else {
             val v = if (_state.value != state) {
                 mutationSeq += 1L
-                // Maps can withdraw its arrival notification in the same scheduler
-                // turn as posting it. A StateFlow collector may see only this clear.
-                val arrival = _state.value.takeIf {
-                    !state.active && it.maneuver == "destination" && it.arrival != "none"
+                val previous = _versioned.value
+                val arrival = previous.state.takeIf {
+                    (!state.active || trackedKeyRemoved) && it.maneuver == "destination" && it.arrival != "none"
                 }
-                VersionedNavState(mutationSeq, state, arrival).also {
+                // An empty snapshot may precede the ordered removal callback. Carry
+                // its existing marker into the fallback using the same arrival sequence.
+                val carry = trackedKeyRemoved && !previous.state.active
+                VersionedNavState(mutationSeq, state,
+                    arrival ?: previous.arrivalBeforeRemoval.takeIf { carry },
+                    if (arrival != null) previous.seq else if (carry) previous.removedArrivalSeq else -1L,
+                ).also {
                     _versioned.value = it
                     _state.value = state
                 }
@@ -149,18 +157,24 @@ class NavFramePublisher(
     private var lastStagedState: NavState? = null
     private var pendingLine: String? = null
     private var arrivalLine: String? = null
+    private var handledArrivalSeq: Long = -1L
+
+    private fun stageRemovedArrival(versioned: VersionedNavState) {
+        if (versioned.seq <= lastStagedSeq) return
+        val arrival = versioned.arrivalBeforeRemoval
+        if (arrival == null) {
+            arrivalLine = null
+        } else if (versioned.removedArrivalSeq > handledArrivalSeq) {
+            handledArrivalSeq = versioned.removedArrivalSeq
+            val alreadyWritten = lastStagedSeq == handledArrivalSeq && lastStagedState == arrival && pendingLine == null
+            arrivalLine = if (alreadyWritten) null else buildFrameJson(arrival, nowMs())
+        }
+    }
 
     fun stageChange(versioned: VersionedNavState, optedIn: Boolean): Boolean = synchronized(lock) {
         if (versioned.seq < lastStagedSeq) return false
         val effective = if (optedIn) versioned.state else NavState()
-        if (optedIn && versioned.seq > lastStagedSeq) {
-            val arrival = versioned.arrivalBeforeRemoval
-            arrivalLine = if (arrival != null && (lastStagedState != arrival || pendingLine != null)) {
-                buildFrameJson(arrival, nowMs())
-            } else null
-        } else if (!optedIn) {
-            arrivalLine = null
-        }
+        if (optedIn) stageRemovedArrival(versioned) else arrivalLine = null
         lastStagedSeq = versioned.seq
         if (effective == lastStagedState && pendingLine == null && arrivalLine == null) return false
         lastStagedState = effective
@@ -176,7 +190,7 @@ class NavFramePublisher(
         if (!optedIn || !versioned.state.active) return false
         // Discard if a newer mutation occurred after the renewal read the state.
         if (versioned.seq < lastStagedSeq || versioned.seq != latestRepoSeq) return false
-        arrivalLine = null
+        stageRemovedArrival(versioned)
         lastStagedSeq = versioned.seq
         lastStagedState = versioned.state
         pendingLine = buildFrameJson(versioned.state, nowMs())
@@ -194,6 +208,7 @@ class NavFramePublisher(
         }
         if (versioned.seq != latestRepoSeq || versioned.seq < lastStagedSeq) return false
         arrivalLine = null
+        handledArrivalSeq = maxOf(handledArrivalSeq, versioned.seq)
         lastStagedSeq = versioned.seq
         lastStagedState = versioned.state
         pendingLine = buildFrameJson(versioned.state, nowMs())
@@ -202,6 +217,7 @@ class NavFramePublisher(
 
     fun stageOptOutClear(clearVersion: VersionedNavState): Boolean = synchronized(lock) {
         arrivalLine = null
+        handledArrivalSeq = maxOf(handledArrivalSeq, clearVersion.seq)
         lastStagedSeq = maxOf(lastStagedSeq, clearVersion.seq)
         val empty = NavState()
         lastStagedState = empty
@@ -263,80 +279,65 @@ object NavNotificationSelector {
     const val GOOGLE_MAPS_PACKAGE = "com.google.android.apps.maps"
 
     private val lock = Any()
-    private val firstSeenSeqByKey = LinkedHashMap<String, Long>()
-    private var nextSeq: Long = 0L
+    private val firstSeenKeys = linkedSetOf<String>()
     private var currentKey: String? = null
+    private var consumedFinalKey: String? = null
 
     fun currentTrackedKey(): String? = synchronized(lock) { currentKey }
 
-    fun shouldAcceptPost(
-        key: String,
-        parsed: NavState,
-        activeEligibleKeys: Set<String>? = null,
-    ): Boolean = synchronized(lock) {
-        if (activeEligibleKeys != null) {
-            firstSeenSeqByKey.keys.retainAll(activeEligibleKeys + key)
-            if (currentKey != null && currentKey !in activeEligibleKeys && currentKey != key) {
-                currentKey = null
-            }
-        }
-        if (!parsed.active) {
-            firstSeenSeqByKey.remove(key)
-            if (currentKey == key) {
-                currentKey = null
-            }
-            return false
-        }
-        val keySeq = firstSeenSeqByKey.getOrPut(key) {
-            nextSeq += 1L
-            nextSeq
-        }
-        val cur = currentKey
-        if (cur == null || cur == key) {
-            currentKey = key
-            return true
-        }
-        val curSeq = firstSeenSeqByKey[cur]
-        return if (curSeq == null || keySeq > curSeq) {
-            currentKey = key
-            true
-        } else {
-            false
-        }
+    /** Called only for a Maps post that qualifies as ongoing guidance by metadata. */
+    fun shouldAcceptPost(key: String): Boolean = synchronized(lock) {
+        firstSeenKeys.add(key)
+        if (firstSeenKeys.indexOf(key) < firstSeenKeys.indexOf(currentKey)) return false
+        currentKey = key
+        consumedFinalKey = null
+        true
+    }
+
+    /** Non-ongoing guidance cannot establish ownership or renew a delivered arrival. */
+    fun canReadFinal(key: String): Boolean = synchronized(lock) {
+        key == currentKey && key != consumedFinalKey
+    }
+
+    fun consumeFinal(key: String): Boolean = synchronized(lock) {
+        if (key != currentKey || key == consumedFinalKey) return false
+        consumedFinalKey = key
+        true
     }
 
     fun selectActive(
         candidates: List<Pair<String, NavState>>,
-        pinnedKey: String? = currentTrackedKey(),
+        finalReplacementKeys: Set<String> = emptySet(),
     ): Pair<String?, NavState> = synchronized(lock) {
-        val activeCandidates = candidates.filter { it.second.active }
-        val activeKeys = activeCandidates.map { it.first }.toSet()
-        firstSeenSeqByKey.keys.retainAll(activeKeys)
-        for ((k, _) in activeCandidates) {
-            if (!firstSeenSeqByKey.containsKey(k)) {
-                nextSeq += 1L
-                firstSeenSeqByKey[k] = nextSeq
-            }
+        // The framework snapshot can already be empty while the final post and
+        // removal callbacks are queued. Forget ownership only on ordered removal,
+        // a newer route, or reset. Absence still clears the live wire state.
+        val tracked = currentKey
+        val ongoingKeys = candidates.map { it.first }
+        firstSeenKeys.addAll(ongoingKeys)
+        val pinned = candidates.firstOrNull { it.first == tracked }
+        if (pinned != null) return pinned
+        val newest = candidates.maxByOrNull { firstSeenKeys.indexOf(it.first) }
+        if (newest != null && firstSeenKeys.indexOf(newest.first) > firstSeenKeys.indexOf(tracked)) {
+            currentKey = newest.first
+            consumedFinalKey = null
+            return newest
         }
+        tracked?.takeIf { it in finalReplacementKeys } to NavState()
+    }
 
-        val targetKey = pinnedKey ?: currentKey
-        if (targetKey != null) {
-            val pinned = activeCandidates.firstOrNull { it.first == targetKey }
-            if (pinned != null) {
-                currentKey = pinned.first
-                return pinned
-            }
-        }
-
-        val newest = activeCandidates.maxByOrNull { firstSeenSeqByKey[it.first] ?: 0L }
-        currentKey = newest?.first
-        return newest ?: (null to NavState())
+    fun remove(key: String): Boolean = synchronized(lock) {
+        val removedOwner = currentKey == key
+        firstSeenKeys.remove(key)
+        if (removedOwner) currentKey = null
+        if (consumedFinalKey == key) consumedFinalKey = null
+        removedOwner
     }
 
     fun reset() = synchronized(lock) {
-        firstSeenSeqByKey.clear()
-        nextSeq = 0L
+        firstSeenKeys.clear()
         currentKey = null
+        consumedFinalKey = null
     }
 }
 
@@ -460,6 +461,11 @@ object NavNotificationParser {
     )
 
     /** Decodes semantic resource names only when the notification had no readable maneuver. */
+    fun resolveManeuverIcons(state: NavState, resourceNames: List<String>, bitmapMatches: List<NavState>): NavState {
+        val candidates = resourceNames.mapNotNull { withManeuverIcon(state, it) } + bitmapMatches
+        return candidates.toSet().singleOrNull() ?: state
+    }
+
     fun withManeuverIcon(state: NavState, resourceName: String): NavState? {
         if (state.maneuver != "none") return state
         val cue = MANEUVER_ICON.matchEntire(resourceName)?.groupValues?.get(1) ?: return null
@@ -479,10 +485,12 @@ object NavNotificationParser {
         bigText: String? = null,
         iconHint: String? = null,
         subText: String? = null,
+        renderedTexts: Collection<String> = emptyList(),
+        summaryText: String? = null,
     ): NavState {
         val titleClauses = extractClauses(title)
         val textClauses = extractClauses(text)
-        val bigClauses = extractClauses(bigText)
+        val bigClauses = extractClauses(bigText) + renderedStepClauses(renderedTexts, subText, summaryText)
         val hintClauses = extractClauses(iconHint)
 
         // Preserve distinct field roles: primary fields (title, text, iconHint)
@@ -597,6 +605,20 @@ object NavNotificationParser {
             arrival = arrivalCue,
             exitNumber = exitNumber,
         )
+    }
+
+    private fun renderedStepClauses(texts: Collection<String>, subText: String?, summaryText: String?): List<String> {
+        if (texts.isEmpty()) return emptyList()
+        // Custom layouts may render route totals again as ordinary TextViews.
+        // Keep layout text as a fallback, while primary step fields retain their own distance.
+        val summaries = listOfNotNull(subText, summaryText).map(::cleanSpace)
+        val summaryClauses = summaries.flatMap(::extractClauses).map(::normalizeForMatch).toSet()
+        val summaryDistances = summaries.flatMap { DISTANCE_REGEX.findAll(it).toList() }
+            .map { it.value.lowercase(Locale.ROOT).replace(" ", "") }.toSet()
+        return texts.flatMap(::extractClauses).filterNot { clause ->
+            normalizeForMatch(clause) in summaryClauses || (PURE_DISTANCE_REGEX.matches(clause) &&
+                clause.lowercase(Locale.ROOT).replace(" ", "") in summaryDistances)
+        }
     }
 
     private fun extractClauses(raw: String?): List<String> {

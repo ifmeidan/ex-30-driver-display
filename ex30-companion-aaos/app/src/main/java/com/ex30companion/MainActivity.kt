@@ -1,13 +1,15 @@
 package com.ex30companion
 
-import android.car.VehiclePropertyIds
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.database.ContentObserver
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSuggestion
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.View
 import android.widget.Toast
@@ -38,6 +40,9 @@ class MainActivity : AppCompatActivity() {
     private val historyAdapter = NavDebugEntryAdapter()
     private var historyUpdates: Job? = null
     private var navIsOn = false
+    private val listenerAccessObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) = renderNavStatus()
+    }
     private val historyBack = object : OnBackPressedCallback(false) {
         override fun handleOnBackPressed() = closeNavHistory()
     }
@@ -138,7 +143,7 @@ class MainActivity : AppCompatActivity() {
                     val rows = PropertyCatalog.entries.map { entry ->
                         PropertyRow(entry, state[entry.propertyId] ?: PropertySample(), now)
                     }
-                    rows to isParked(state)
+                    rows to hasParkSignal(state)
                 }.collect { (rows, parked) ->
                     adapter.submitList(rows)
                     binding.list.visibility = if (parked) View.VISIBLE else View.GONE
@@ -344,18 +349,12 @@ class MainActivity : AppCompatActivity() {
         binding.wifiStatus.text = if (ssid == null) message else getString(R.string.wifi_named_status, ssid, message)
     }
 
-    /**
-     * Distraction gate: show live property data only when the vehicle is
-     * demonstrably stationary. Either signal alone is accepted — VHAL stub
-     * builds may report only one. Conservative default is "not parked".
-     */
-    private fun isParked(state: Map<Int, PropertySample>): Boolean {
-        val brake = state[VehiclePropertyIds.PARKING_BRAKE_ON]
-        if (brake?.status == PropertyStatus.OK && brake.value == true) return true
-        val gear = state[VehiclePropertyIds.GEAR_SELECTION]
-        // android.car.VehicleGear.GEAR_PARK == 0x0004 (pinned, see WireFieldMapper).
-        if (gear?.status == PropertyStatus.OK && (gear.value as? Number)?.toInt() == 0x0004) return true
-        return false
+    override fun onStart() {
+        super.onStart()
+        // NotificationManagerCompat reads this per-user setting for listener access.
+        contentResolver.registerContentObserver(
+            Settings.Secure.getUriFor("enabled_notification_listeners"), false, listenerAccessObserver,
+        )
     }
 
     override fun onResume() {
@@ -365,6 +364,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        contentResolver.unregisterContentObserver(listenerAccessObserver)
         closeNavHistory()
         super.onStop()
     }
@@ -412,7 +412,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateNavHistoryAccess() {
-        val allowed = navIsOn && parkedForNavHistory(VehicleStateRepository.state.value)
+        val allowed = navIsOn && VehicleStateRepository.parkedForNavHistory
         binding.navDebug.isVisible = allowed
         if (!allowed) closeNavHistory()
     }
@@ -421,16 +421,6 @@ class MainActivity : AppCompatActivity() {
         // Recheck permission and the latest vehicle samples at the time of the tap.
         renderNavStatus()
         return lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) && binding.navDebug.isVisible
-    }
-
-    private fun parkedForNavHistory(state: Map<Int, PropertySample>): Boolean {
-        fun moving(id: Int): Boolean {
-            val sample = state[id] ?: return false
-            val speed = (sample.value as? Number)?.toDouble() ?: return false
-            return sample.status == PropertyStatus.OK && speed.isFinite() && speed != 0.0
-        }
-        return isParked(state) && !moving(VehiclePropertyIds.PERF_VEHICLE_SPEED) &&
-            !moving(VehiclePropertyIds.PERF_VEHICLE_SPEED_DISPLAY)
     }
 
     private fun renderSoakStatus() {

@@ -145,7 +145,8 @@ and wall-clock sync.
 - **Reconnect, renewal & timeout contract:**
   - The sender coalesces turn updates. If Maps removes an explicit arrival
     before the connected writer delivers it, the writer sends that arrival
-    followed by the inactive frame. Opt-out discards any pending arrival.
+    once, followed by the current cue from any remaining eligible Maps route
+    or an inactive frame when guidance has ended. Opt-out discards any pending arrival.
     On connect/reconnect, immediately after `hello`, the sender
     revalidates live `activeNotifications` and sends only the single latest
     validated state (including `active: false` when no route is active).

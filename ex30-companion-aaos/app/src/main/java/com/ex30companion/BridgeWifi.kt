@@ -105,13 +105,14 @@ class BridgeWifi(private val context: Context, private val closeSocket: () -> Un
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
         val flags = if (ssid == null) 0 else ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO
-        // A generic request holds the best Wi-Fi link, which may not be the Pi.
-        // Observe all Wi-Fi links (including non-default, unvalidated links) independently.
         val cb = object : ConnectivityManager.NetworkCallback(flags) {
             private val matching = linkedSetOf<Network>()
 
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                 if (observer !== this) return
+                // The best-match callback can switch straight to a higher-ranked network
+                // without an onLost for the previous one. Host-only follows that switch.
+                if (ssid == null) matching.clear()
                 val info = caps.transportInfo as? WifiInfo
                 val reported = info?.ssid
                 val matches = ssid == null || (info != null &&
@@ -147,7 +148,12 @@ class BridgeWifi(private val context: Context, private val closeSocket: () -> Un
         }
         state.value = Status.REQUESTING
         try {
-            cm.registerNetworkCallback(request, cb, main)
+            if (ssid == null) {
+                cm.registerBestMatchingNetworkCallback(request, cb, main)
+            } else {
+                // The named Pi can be an unvalidated, non-default Wi-Fi network.
+                cm.registerNetworkCallback(request, cb, main)
+            }
             observer = cb
             Log.d(TAG, "Watching for bridge Wi-Fi")
             val keepWifi = ConnectivityManager.NetworkCallback()
