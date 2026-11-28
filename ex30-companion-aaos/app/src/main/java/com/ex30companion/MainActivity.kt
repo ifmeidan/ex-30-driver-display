@@ -11,10 +11,12 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.View
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.isVisible
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -23,6 +25,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.ex30companion.databinding.ActivityMainBinding
 import com.ex30companion.databinding.DialogBridgeWifiBinding
 import java.security.GeneralSecurityException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
@@ -32,6 +35,12 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var adapter: PropertyListAdapter
+    private val historyAdapter = NavDebugEntryAdapter()
+    private var historyUpdates: Job? = null
+    private var navIsOn = false
+    private val historyBack = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() = closeNavHistory()
+    }
 
     private enum class WifiSetup { CONNECT, ADD_IF_NEEDED, ADD }
     private var pendingWifiSetup = WifiSetup.CONNECT
@@ -72,6 +81,7 @@ class MainActivity : AppCompatActivity() {
         adapter = PropertyListAdapter()
         binding.list.layoutManager = LinearLayoutManager(this)
         binding.list.adapter = adapter
+        setUpNavHistory()
 
         binding.hostInput.setText(BridgeSettings.host(this).orEmpty())
         binding.hostApply.setOnClickListener {
@@ -133,6 +143,7 @@ class MainActivity : AppCompatActivity() {
                     adapter.submitList(rows)
                     binding.list.visibility = if (parked) View.VISIBLE else View.GONE
                     binding.parkedCard.visibility = if (parked) View.GONE else View.VISIBLE
+                    updateNavHistoryAccess()
                 }
             }
         }
@@ -353,6 +364,75 @@ class MainActivity : AppCompatActivity() {
         renderNavStatus()
     }
 
+    override fun onStop() {
+        closeNavHistory()
+        super.onStop()
+    }
+
+    private fun setUpNavHistory() {
+        val screen = binding.navDebugHistory
+        screen.historyList.layoutManager = LinearLayoutManager(this)
+        screen.historyList.adapter = historyAdapter
+        onBackPressedDispatcher.addCallback(this, historyBack)
+        binding.navDebug.setOnClickListener { openNavHistory() }
+        screen.historyBack.setOnClickListener { closeNavHistory() }
+        screen.historyRecord.setOnClickListener {
+            if (checkNavHistoryAccess()) BridgeSettings.setNavDebugEnabled(this, screen.historyRecord.isChecked)
+        }
+        screen.historyClear.setOnClickListener {
+            if (checkNavHistoryAccess()) NavDebugHistory.clear(this)
+        }
+    }
+
+    private fun openNavHistory() {
+        if (!checkNavHistoryAccess()) return
+        val screen = binding.navDebugHistory
+        binding.dashboard.isVisible = false
+        screen.root.isVisible = true
+        screen.historyRecord.isChecked = BridgeSettings.navDebugEnabled(this)
+        screen.historyList.scrollToPosition(0)
+        historyBack.isEnabled = true
+        historyUpdates = lifecycleScope.launch {
+            NavDebugHistory.entries(this@MainActivity).collect { entries ->
+                historyAdapter.submitList(entries)
+                screen.historyClear.isEnabled = entries.isNotEmpty()
+                screen.historyEmpty.isVisible = entries.isEmpty()
+            }
+        }
+    }
+
+    private fun closeNavHistory() {
+        if (!historyBack.isEnabled) return
+        historyBack.isEnabled = false
+        historyUpdates?.cancel()
+        historyUpdates = null
+        binding.navDebugHistory.root.isVisible = false
+        binding.dashboard.isVisible = true
+        historyAdapter.submitList(emptyList())
+    }
+
+    private fun updateNavHistoryAccess() {
+        val allowed = navIsOn && parkedForNavHistory(VehicleStateRepository.state.value)
+        binding.navDebug.isVisible = allowed
+        if (!allowed) closeNavHistory()
+    }
+
+    private fun checkNavHistoryAccess(): Boolean {
+        // Recheck permission and the latest vehicle samples at the time of the tap.
+        renderNavStatus()
+        return lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) && binding.navDebug.isVisible
+    }
+
+    private fun parkedForNavHistory(state: Map<Int, PropertySample>): Boolean {
+        fun moving(id: Int): Boolean {
+            val sample = state[id] ?: return false
+            val speed = (sample.value as? Number)?.toDouble() ?: return false
+            return sample.status == PropertyStatus.OK && speed.isFinite() && speed != 0.0
+        }
+        return isParked(state) && !moving(VehiclePropertyIds.PERF_VEHICLE_SPEED) &&
+            !moving(VehiclePropertyIds.PERF_VEHICLE_SPEED_DISPLAY)
+    }
+
     private fun renderSoakStatus() {
         binding.soakToggle.text = if (SyntheticLoadDriver.isRunning()) "Soak: ON" else "Soak"
     }
@@ -360,11 +440,13 @@ class MainActivity : AppCompatActivity() {
     private fun renderNavStatus() {
         val enabled = BridgeSettings.navEnabled(this)
         val granted = NavNotificationListenerService.isPermissionGranted(this)
+        navIsOn = enabled && granted
         binding.navToggle.text = when {
             !enabled -> "Nav: OFF"
             !granted -> "Nav: Grant"
             else -> "Nav: ON"
         }
+        updateNavHistoryAccess()
     }
 
     private fun onNavToggleClicked() {

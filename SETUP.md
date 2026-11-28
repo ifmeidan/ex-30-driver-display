@@ -223,6 +223,20 @@ network in car Settings → Network → WiFi. Choose **Stay connected** if
 Android reports that it has no internet. Existing host-only setups and
 versions showing only a host field use this method.
 
+### Review navigation after a drive
+
+While parked, enable **Nav** and grant Android Notification Access. Open
+**Nav Debug** and turn on **Record navigation on this device** before starting
+the route. Recording
+continues while the app screen is closed and also works when the Pi is offline.
+
+After parking, open **Nav Debug** again to scroll through the latest 500
+events. Each entry shows what Companion could read, including cases where
+only a distance was available or the maneuver was unrecognized. For an
+unrecognized cue, the entry lists which fields or icon types Maps supplied.
+You can stop recording and still review the saved entries. **Clear history**
+removes them from the head unit.
+
 ## 8. First drive checklist
 
 - Power on the car → Pi boots → iron-mark splash → loading screen shows

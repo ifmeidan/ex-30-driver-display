@@ -162,6 +162,10 @@ and wall-clock sync.
   - Passing `--aaos-nav-diag` (`nav_diag=True`, default `False`) on the Pi logs
     only sanitized state transitions (`nav state: active=True maneuver=... distance=... arrival=... exit=...`)
     and clear reasons (`nav cleared: reason=...`).
+  - With Nav enabled, the parked **Nav Debug** screen can separately enable
+    recording on the head unit. It retains the latest 500 local guidance and
+    diagnostic events for review after the drive. The history works offline
+    and adds no fields or messages to the bridge protocol.
   - For on-device diagnosis, enable `adb shell setprop log.tag.Ex30Nav DEBUG`
     and read `adb logcat -s Ex30Nav:D`. The listener logs canonical cues from
     accepted posts even while the bridge is disconnected. For unknown maneuvers

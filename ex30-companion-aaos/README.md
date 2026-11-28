@@ -28,6 +28,8 @@ see the [AAOS and Raspberry Pi runner version notes](../CHANGELOG.md).
   wire protocol in [`pi_bridge/protocol.md`](pi_bridge/protocol.md).
 - Waits ten seconds after the head unit starts or wakes, then uses the saved
   Pi Wi-Fi when Android joins it. Startup and retries run in the background.
+- With **Nav Debug** recording enabled, keeps a local history of recognized
+  and unrecognized Google Maps cues for review after parking. [Setup guide](../SETUP.md#review-navigation-after-a-drive)
 - Goes quiet when you leave the car (ignition/screen-off detection) so
   it never drains the 12 V battery or holds the vehicle network awake;
   stays up while charging so the Pi can render the charging screen.

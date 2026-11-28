@@ -54,6 +54,11 @@ Access to the app in system settings:
 - Street names, destination names/addresses, ETA, and raw notification text are
   discarded immediately in memory and are **never** retained, transmitted on the
   wire, or written to Pi disk logs.
+- A separate **Nav Debug** switch enables local history. The driver can turn
+  recording on while parked and review it after a drive. Entries contain a
+  timestamp, the recognized guidance fields, and, for unrecognized cues,
+  the kinds of notification fields or icons available. Raw text and images
+  stay out of the history.
 
 ## What the app does with that data
 
@@ -71,9 +76,8 @@ software.
 - No data is sent to any server operated by the app developer or any third
   party. The source code contains no analytics SDK, no ad SDK, no crash
   reporter, and no telemetry of any kind.
-- The app stores no logs of vehicle data on the device. A developer can
-  explicitly enable the `Ex30Nav` debug log tag to see the four sanitized
-  navigation fields in Android's diagnostic log.
+- Vehicle telemetry is processed in memory. Optional navigation history
+  stays on the head unit in the app's private storage.
 
 ## What the app does **not** do
 
@@ -120,7 +124,12 @@ app removes its local settings. To remove the system's saved network, choose
 **Forget** in the head unit's Wi-Fi settings.
 
 The app keeps vehicle telemetry and navigation cues in memory for forwarding
-to the user-supplied local address. If a developer explicitly enables the
+to the user-supplied local address. With **Nav Debug** recording enabled,
+the latest 500 navigation events also persist in private, backup-excluded
+storage on the head unit. New entries replace the oldest at the limit.
+Stopping recording preserves the history for review. Clearing history in
+**Nav Debug**, clearing app storage, or uninstalling the app removes it.
+If a developer explicitly enables the
 `Ex30Nav` debug tag, sanitized cues and notification field availability can
 also appear in the local Android diagnostic log.
 

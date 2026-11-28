@@ -54,6 +54,7 @@ class NavNotificationListenerService : NotificationListenerService() {
         synchronized(serviceLock) {
             NavNotificationSelector.reset()
             NavStateRepository.clear()
+            NavDebugHistory.resetSession()
         }
         super.onListenerDisconnected()
     }
@@ -72,11 +73,12 @@ class NavNotificationListenerService : NotificationListenerService() {
                     // Maps can replace the very same guidance notification with a
                     // dismissible arrival. It is a final post, never a renewable cue.
                     if (isMapsNavigationPost(sbn.packageName, sbn.notification.flags, sbn.notification.category)) {
-                        val finalCue = parseNotification(sbn.notification, diagnose = true)
-                        if (finalCue.maneuver == "destination" && finalCue.arrival != "none") {
-                            publishCue(finalCue)
+                        val finalCue = parseNotification(sbn.notification, diagnose = true, finalUpdate = true)
+                        if (finalCue.cue.maneuver == "destination" && finalCue.cue.arrival != "none") {
+                            publishCue(sbn.key, finalCue)
                             return
                         }
+                        NavDebugHistory.observe(this, sbn.key, finalCue.cue, finalCue.sources, finalUpdate = true)
                     }
                     refreshFromActiveLocked()
                 }
@@ -85,12 +87,16 @@ class NavNotificationListenerService : NotificationListenerService() {
 
             val parsed = parseNotification(sbn.notification, diagnose = true)
             val activeKeys = currentEligibleKeysOrNull()
-            if (parsed.active) {
-                if (NavNotificationSelector.shouldAcceptPost(sbn.key, parsed, activeKeys)) {
-                    publishCue(parsed)
+            if (parsed.cue.active) {
+                if (NavNotificationSelector.shouldAcceptPost(sbn.key, parsed.cue, activeKeys)) {
+                    publishCue(sbn.key, parsed)
                 }
-            } else if (sbn.key == NavNotificationSelector.currentTrackedKey()) {
-                refreshFromActiveLocked()
+            } else {
+                val tracked = NavNotificationSelector.currentTrackedKey()
+                if (tracked == null || sbn.key == tracked) {
+                    NavDebugHistory.observe(this, sbn.key, parsed.cue, parsed.sources)
+                }
+                if (sbn.key == tracked) refreshFromActiveLocked()
             }
         }
     }
@@ -135,17 +141,25 @@ class NavNotificationListenerService : NotificationListenerService() {
             return
         }
 
-        val candidates = active.mapNotNull { sbn ->
-            if (!isEligibleGoogleMapsGuidance(sbn)) null
-            else sbn.key to parseNotification(sbn.notification)
-        }
-        val (_, selectedState) = NavNotificationSelector.selectActive(candidates)
+        val eligible = active.filter(::isEligibleGoogleMapsGuidance)
+        val parsed = eligible.associate { it.key to parseNotification(it.notification) }
+        val (selectedKey, selectedState) = NavNotificationSelector.selectActive(parsed.map { it.key to it.value.cue })
         if (!isOptedInAndPermitted()) {
             NavNotificationSelector.reset()
             NavStateRepository.clear()
             return
         }
-        NavStateRepository.applyRefreshIfUnchanged(seqBefore, selectedState)
+        if (NavStateRepository.applyRefreshIfUnchanged(seqBefore, selectedState) != null) {
+            // Also catch a route already underway when the listener binds or debug is
+            // enabled. The history suppresses renewals with the same key and outcome.
+            val key = selectedKey ?: eligible.maxByOrNull { it.postTime }?.key
+            if (key != null) {
+                val result = parsed.getValue(key)
+                NavDebugHistory.observe(this, key, result.cue, result.sources)
+            } else {
+                NavDebugHistory.ended(this)
+            }
+        }
     }
 
     private fun currentEligibleKeysOrNull(): Set<String>? = try {
@@ -160,14 +174,20 @@ class NavNotificationListenerService : NotificationListenerService() {
     private fun isOptedInAndPermitted(): Boolean =
         BridgeSettings.navEnabled(this) && isPermissionGranted(this)
 
-    private fun publishCue(cue: NavState) {
+    private fun publishCue(key: String, parsed: ParsedGuidance) {
+        val cue = parsed.cue
         if (NavStateRepository.state.value != cue && Log.isLoggable(TAG, Log.DEBUG)) {
             Log.d(TAG, "maneuver=${cue.maneuver} distance=${cue.distance} arrival=${cue.arrival} exit=${cue.exitNumber}")
         }
         NavStateRepository.update(cue)
+        NavDebugHistory.observe(this, key, cue, parsed.sources)
     }
 
-    private fun parseNotification(notification: Notification, diagnose: Boolean = false): NavState {
+    private data class ParsedGuidance(val cue: NavState, val sources: Set<NavDebugSource>)
+
+    private fun parseNotification(
+        notification: Notification, diagnose: Boolean = false, finalUpdate: Boolean = false,
+    ): ParsedGuidance {
         val extras = notification.extras ?: Bundle.EMPTY
         val car = if (CarAppExtender.isExtended(notification)) CarAppExtender(notification) else null
         val rvData = extractRemoteViewsData(notification)
@@ -198,21 +218,40 @@ class NavNotificationListenerService : NotificationListenerService() {
             subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString(),
         )
         val parsed = if (cue.maneuver == "none") withManeuverIcon(cue, notification, car, rvData.bitmaps) else cue
-        if (diagnose && Log.isLoggable(TAG, Log.DEBUG)) {
+        val logShape = diagnose && Log.isLoggable(TAG, Log.DEBUG)
+        val needsSources = parsed.maneuver == "none" ||
+            (finalUpdate && (parsed.maneuver != "destination" || parsed.arrival == "none"))
+        val sources = if (needsSources && (logShape || BridgeSettings.navDebugEnabled(this))) {
+            buildSet {
+                if (car?.contentTitle != null || car?.contentText != null) add(NavDebugSource.CAR_TEXT)
+                if (extras.containsKey(Notification.EXTRA_TITLE) || extras.containsKey(Notification.EXTRA_TEXT) ||
+                    extras.containsKey(Notification.EXTRA_TITLE_BIG)) add(NavDebugSource.PRIMARY_TEXT)
+                if (extras.containsKey(Notification.EXTRA_BIG_TEXT) || extras.containsKey(Notification.EXTRA_TEXT_LINES)) {
+                    add(NavDebugSource.EXPANDED_TEXT)
+                }
+                if (notification.tickerText != null) add(NavDebugSource.TICKER)
+                if (extras.containsKey(Notification.EXTRA_SUB_TEXT)) add(NavDebugSource.SUBTEXT)
+                if (rvStrings.isNotEmpty()) add(NavDebugSource.REMOTE_TEXT)
+                if (rvData.descriptions.isNotEmpty() || extras.containsKey(Notification.EXTRA_PICTURE_CONTENT_DESCRIPTION)) {
+                    add(NavDebugSource.ICON_DESCRIPTION)
+                }
+                val types = listOf(notification.getLargeIcon()?.type, notification.smallIcon?.type)
+                if (Icon.TYPE_RESOURCE in types || (car?.smallIcon ?: 0) != 0) add(NavDebugSource.RESOURCE_ICON)
+                if (Icon.TYPE_BITMAP in types || Icon.TYPE_ADAPTIVE_BITMAP in types ||
+                    car?.largeIcon != null || rvData.bitmaps.isNotEmpty()) add(NavDebugSource.BITMAP_ICON)
+            }
+        } else emptySet()
+        if (logShape) {
             if (parsed.maneuver == "none") {
-                val shape = "distanceOnly=${parsed.active} carText=${car?.contentTitle != null || car?.contentText != null}" +
-                    " primaryText=${extras.containsKey(Notification.EXTRA_TITLE) || extras.containsKey(Notification.EXTRA_TEXT)}" +
-                    " expandedText=${extras.containsKey(Notification.EXTRA_BIG_TEXT) || extras.containsKey(Notification.EXTRA_TEXT_LINES)}" +
-                    " remoteText=${rvStrings.isNotEmpty()} iconDescription=${rvData.descriptions.isNotEmpty() || extras.containsKey(Notification.EXTRA_PICTURE_CONTENT_DESCRIPTION)}" +
-                    " largeIconType=${notification.getLargeIcon()?.type} smallIconType=${notification.smallIcon?.type}" +
-                    " carBitmap=${car?.largeIcon != null} remoteManeuverBitmap=${rvData.bitmaps.isNotEmpty()}"
+                val shape = "distanceOnly=${parsed.active} sources=$sources" +
+                    " largeIconType=${notification.getLargeIcon()?.type} smallIconType=${notification.smallIcon?.type}"
                 if (shape != lastUnknownShape) Log.d(TAG, "Unrecognized Maps guidance $shape")
                 lastUnknownShape = shape
             } else {
                 lastUnknownShape = null
             }
         }
-        return parsed
+        return ParsedGuidance(parsed, sources)
     }
 
     // A named drawable can carry the maneuver when the accessible text only
