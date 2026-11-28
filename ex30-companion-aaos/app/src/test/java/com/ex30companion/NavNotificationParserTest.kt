@@ -467,5 +467,63 @@ class NavNotificationParserTest {
         assertTrue(trTurn.active)
         assertEquals("turn_right", trTurn.maneuver)
         assertEquals("1,2 km", trTurn.distance)
+
+        // Turkish initial cardinal heading cue ("Doğu yönünde ilerleyin")
+        val trHeading = NavNotificationParser.parse(title = "Doğu yönünde ilerleyin", text = null)
+        assertTrue(trHeading.active)
+        assertEquals("straight", trHeading.maneuver)
+    }
+
+    @Test
+    fun `roundabout u-turn exit and monochrome bitmap masks resolve maneuvers when text has only distance and street`() {
+        val base = NavNotificationParser.parse(title = "400 m", text = "Bakü Cd.")
+        assertEquals(NavState(true, "none", "400 m"), base)
+
+        assertEquals(
+            NavState(true, "roundabout", "400 m"),
+            NavNotificationParser.withManeuverIcon(base, "ic_notification_roundabout_right_24dp"),
+        )
+        assertEquals(
+            NavState(true, "roundabout", "400 m", exitNumber = 3),
+            NavNotificationParser.withManeuverIcon(base, "da_roundabout_exit_3"),
+        )
+        assertEquals(
+            NavState(true, "uturn", "400 m"),
+            NavNotificationParser.withManeuverIcon(base, "ic_u_turn_left_white"),
+        )
+        assertEquals(
+            NavState(true, "exit_right", "400 m"),
+            NavNotificationParser.withManeuverIcon(base, "ic_fork_right_24"),
+        )
+        assertEquals(
+            NavState(true, "turn_right", "400 m"),
+            NavNotificationParser.withManeuverIcon(base, "da_turn_right"),
+        )
+
+        val rightMask = NavNotificationParser.classifyManeuverMask(32, 32) { x, y ->
+            (x in 10..13 && y in 10..27) || (y in 8..12 && x in 10..26)
+        }
+        assertEquals("turn_right", rightMask)
+
+        val leftMask = NavNotificationParser.classifyManeuverMask(32, 32) { x, y ->
+            (x in 18..21 && y in 10..27) || (y in 8..12 && x in 5..21)
+        }
+        assertEquals("turn_left", leftMask)
+
+        val straightMask = NavNotificationParser.classifyManeuverMask(32, 32) { x, y ->
+            (x in 14..17 && y in 6..27) || (y in 8..12 && x in 11..20)
+        }
+        assertEquals("straight", straightMask)
+
+        val roundaboutMask = NavNotificationParser.classifyManeuverMask(32, 32) { x, y ->
+            val dx = x - 16.0
+            val dy = y - 16.0
+            val r = kotlin.math.sqrt(dx * dx + dy * dy)
+            val inRing = r in 5.5..8.5
+            val inStem = x in 15..17 && y in 23..28
+            val inExit = (x - 16) in 4..10 && kotlin.math.abs((x - 16) - (16 - y)) <= 1
+            inRing || inStem || inExit
+        }
+        assertEquals("roundabout", roundaboutMask)
     }
 }
