@@ -295,6 +295,7 @@ class NavNotificationListenerService : NotificationListenerService() {
         val texts = linkedSetOf<String>()
         val descriptions = linkedSetOf<String>()
         val bitmaps = linkedSetOf<Bitmap>()
+        val fallbackBitmaps = linkedSetOf<Bitmap>()
     }
 
     @Suppress("DEPRECATION")
@@ -313,13 +314,23 @@ class NavNotificationListenerService : NotificationListenerService() {
             } catch (_: Throwable) {
             }
         }
+        if (data.bitmaps.isEmpty() && data.fallbackBitmaps.isNotEmpty()) {
+            data.bitmaps.addAll(data.fallbackBitmaps)
+        }
         return data
     }
 
     private fun collectViews(v: View?, data: RemoteViewsData, maneuverIconId: Int) {
         if (v == null || v.visibility != View.VISIBLE) return
-        if (maneuverIconId != 0 && v.id == maneuverIconId && v is ImageView) {
-            (v.drawable as? BitmapDrawable)?.bitmap?.let { data.bitmaps.add(it) }
+        if (v is ImageView) {
+            val bmp = (v.drawable as? BitmapDrawable)?.bitmap
+            if (bmp != null) {
+                if (maneuverIconId != 0 && v.id == maneuverIconId) {
+                    data.bitmaps.add(bmp)
+                } else {
+                    data.fallbackBitmaps.add(bmp)
+                }
+            }
         }
         v.contentDescription?.toString()?.replace(Regex("""[^\S\r\n]+"""), " ")?.trim()?.let { desc ->
             if (desc.isNotEmpty() && desc.lowercase(Locale("tr", "TR")) !in ACTION_LABELS) {

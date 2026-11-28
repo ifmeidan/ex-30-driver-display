@@ -7,11 +7,17 @@ import android.graphics.Bitmap
 internal object NavManeuverBitmap {
     private val names = listOf(
         "turn_right", "turn_left", "turn_slight_right", "turn_slight_left",
+        "turn_sharp_right", "turn_sharp_left", "sharp_right", "sharp_left",
+        "slight_right", "slight_left", "keep_right", "keep_left",
+        "roundabout", "roundabout_right", "roundabout_left",
+        "u_turn", "u_turn_right", "u_turn_left", "uturn",
+        "fork_right", "fork_left", "exit_right", "exit_left",
+        "merge", "merge_right", "merge_left", "straight", "continue_straight",
         "arrive", "maneuver_destination", "destination_right", "destination_left",
         // Some icon sets reuse a turn arrow for a ramp. Such a match is ambiguous.
         "on_ramp_right", "on_ramp_left", "off_ramp_right", "off_ramp_left",
         "on_ramp_slight_right", "on_ramp_slight_left", "off_ramp_slight_right", "off_ramp_slight_left",
-    ).flatMap { listOf("ic_$it", "ic_notification_$it") }
+    ).flatMap { listOf("ic_$it", "ic_notification_$it", "da_$it", "da_turn_$it") }
 
     fun match(state: NavState, bitmap: Bitmap, lookup: (String) -> Bitmap?): NavState? {
         if (bitmap.width !in 16..256 || bitmap.height !in 16..256 ||
@@ -27,7 +33,27 @@ internal object NavManeuverBitmap {
             if (match != null && match != cue) return null
             match = cue
         }
-        return match?.takeIf { isMonochromeSilhouette(bitmap) }
+        val exactMatch = match?.takeIf { isMonochromeSilhouette(bitmap) }
+        if (exactMatch != null) return exactMatch
+
+        // Fallback for dynamically rendered monochrome maneuver bitmaps (e.g. AAOS
+        // roundabouts or turn arrows drawn on a Canvas that do not match a static
+        // APK BitmapDrawable pixel-for-pixel).
+        if (!state.active || !isMonochromeSilhouette(bitmap)) return null
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        val maskManeuver = NavNotificationParser.classifyManeuverMask(w, h) { x, y ->
+            val c = pixels[y * w + x]
+            val a = (c ushr 24) and 0xFF
+            a >= 96
+        }
+        return if (maskManeuver != "none") {
+            state.copy(active = true, maneuver = maskManeuver)
+        } else {
+            null
+        }
     }
 
     private fun isMonochromeSilhouette(bitmap: Bitmap): Boolean {

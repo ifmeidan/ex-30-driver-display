@@ -437,7 +437,7 @@ object NavNotificationParser {
     )
     private val MERGE_REGEX = Regex("""$WB(?:kat[ıi]l[ıi]?n?|birleş[i]?n?|merge)$WE""")
     private val STRAIGHT_REGEX = Regex(
-        """$WB(?:düz\s+devam|düz\s+gidin|düz|ileri\s+devam|straight|continue\s+straight|continue\s+on|continue\s+for|head\s+(?:north|south|east|west|straight)|keep\s+going)$WE""",
+        """$WB(?:düz\s+devam|düz\s+gidin|düz|ileri\s+devam|(?:kuzey|güney|doğu|bat[ıi]|kuzeydoğu|kuzeybat[ıi]|güneydoğu|güneybat[ıi])\s+yönünde\s+ilerleyin|ilerleyin|straight|continue\s+straight|continue\s+on|continue\s+for|head\s+(?:north|south|east|west|northeast|northwest|southeast|southwest|straight)|keep\s+going)$WE""",
     )
 
     private val ARRIVAL_NOUN_REGEX = Regex(
@@ -454,10 +454,18 @@ object NavNotificationParser {
     private val AWAY_SUMMARY_REGEX = Regex("""$WB(?:away|uzakta|kald[ıi]|remaining)$WE""")
 
     private val MANEUVER_ICON = Regex(
-        """(?:ic_|notification_|nav_|navigation_|directions_|maneuver_)*""" +
-            """((?:turn_)?(?:sharp|slight|keep|bear)_(?:right|left)|turn_(?:right|left)|""" +
-            """(?:arrive|arrival|destination)_(?:right|left)|arrive|arrival|arrived|maneuver_destination)""" +
-            """(?:_(?:black|white|\d{1,3}(?:dp|px)?))*""",
+        """(?:da_|quantum_ic_|ic_|notification_|nav_|navigation_|directions_|maneuver_)*""" +
+            """(""" +
+            """roundabout(?:_(?:right|left|sharp_right|sharp_left|slight_right|slight_left|straight|u_turn|uturn))?(?:_(?:exit_)?[1-9])?|""" +
+            """rotary(?:_(?:right|left))?|""" +
+            """u_turn(?:_(?:right|left))?|uturn(?:_(?:right|left))?|""" +
+            """(?:exit|fork|off_ramp|on_ramp)_(?:sharp_|slight_)?(?:right|left)|""" +
+            """merge(?:_(?:right|left|slight_right|slight_left))?|""" +
+            """straight|continue_straight|""" +
+            """(?:turn_)?(?:sharp|slight|keep|bear)_(?:right|left)|turn_(?:right|left)|""" +
+            """(?:arrive|arrival|destination)_(?:right|left)|arrive|arrival|arrived|maneuver_destination""" +
+            """)""" +
+            """(?:_(?:black|white|day|night|auto|\d{1,3}(?:dp|px)?))*""",
     )
 
     /** Decodes semantic resource names only when the notification had no readable maneuver. */
@@ -475,8 +483,30 @@ object NavNotificationParser {
             "arrive", "arrived", "arrival", "maneuver_destination" -> "destination"
             else -> "none"
         }
-        val maneuver = if (arrival != "none") "destination" else classifyTurnClause(cue.replace('_', ' ')).first
-        return state.copy(active = true, maneuver = maneuver, arrival = arrival)
+        if (arrival != "none") {
+            return state.copy(active = true, maneuver = "destination", arrival = arrival)
+        }
+        val (maneuver, exitNum) = when {
+            cue.startsWith("roundabout") || cue.startsWith("rotary") -> {
+                val exitDigit = Regex("""(?:_exit_|_)([1-9])$""").find(cue)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: state.exitNumber
+                "roundabout" to exitDigit
+            }
+            cue.startsWith("u_turn") || cue.startsWith("uturn") -> "uturn" to 0
+            cue.startsWith("fork_left") || cue.startsWith("exit_left") ||
+                cue.startsWith("off_ramp_left") || cue.startsWith("on_ramp_left") -> "exit_left" to 0
+            cue.startsWith("fork_right") || cue.startsWith("exit_right") ||
+                cue.startsWith("off_ramp_right") || cue.startsWith("on_ramp_right") -> "exit_right" to 0
+            cue.startsWith("merge") -> "merge" to 0
+            cue == "straight" || cue == "continue_straight" -> "straight" to 0
+            else -> classifyTurnClause(cue.replace('_', ' '))
+        }
+        if (maneuver == "none") return null
+        return state.copy(
+            active = true,
+            maneuver = maneuver,
+            exitNumber = if (maneuver == "roundabout") exitNum else 0,
+        )
     }
 
     fun parse(
@@ -746,5 +776,144 @@ object NavNotificationParser {
             }
         }
         return 0
+    }
+
+    /**
+     * Classifies a monochrome maneuver arrow icon mask (`width` x `height`) when
+     * the head-unit Google Maps notification contains only distance + street name
+     * in text (`"400 m"`, `"Bakü Cd."`) and conveys the turn direction solely via
+     * a rendered maneuver icon bitmap that does not match a static APK drawable.
+     */
+    fun classifyManeuverMask(
+        width: Int,
+        height: Int,
+        isForeground: (x: Int, y: Int) -> Boolean,
+    ): String {
+        if (width < 8 || height < 8) return "none"
+        var minX = width
+        var maxX = -1
+        var minY = height
+        var maxY = -1
+        var total = 0
+
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                if (isForeground(x, y)) {
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+                    total++
+                }
+            }
+        }
+        val area = width * height
+        if (total < 12 || total > area * 3 / 4) return "none"
+        val bw = (maxX - minX + 1).coerceAtLeast(1)
+        val bh = (maxY - minY + 1).coerceAtLeast(1)
+        if (bw < 5 || bh < 5) return "none"
+
+        var topSumX = 0.0
+        var topCount = 0
+        var topLeft = 0
+        var topRight = 0
+        var midLeft = 0
+        var midRight = 0
+        var botSumX = 0.0
+        var botCount = 0
+        var botLeft = 0
+        var botRight = 0
+
+        var ringCount = 0
+        var ringActive = 0
+        var holeCount = 0
+        var holeActive = 0
+
+        for (y in minY..maxY) {
+            val ny = (y - minY + 0.5) / bh
+            for (x in minX..maxX) {
+                val nx = (x - minX + 0.5) / bw
+                val dx = nx - 0.5
+                val dy = ny - 0.50
+                val r = kotlin.math.sqrt(dx * dx + dy * dy)
+                val fg = isForeground(x, y)
+
+                if (r <= 0.14) {
+                    holeCount++
+                    if (fg) holeActive++
+                } else if (r in 0.18..0.40) {
+                    ringCount++
+                    if (fg) ringActive++
+                }
+
+                if (!fg) continue
+                if (ny <= 0.45) {
+                    topSumX += nx
+                    topCount++
+                    if (nx < 0.45) topLeft++
+                    else if (nx > 0.55) topRight++
+                }
+                if (ny in 0.15..0.65) {
+                    if (nx < 0.45) midLeft++
+                    else if (nx > 0.55) midRight++
+                }
+                if (ny >= 0.55) {
+                    botSumX += nx
+                    botCount++
+                    if (nx < 0.45) botLeft++
+                    else if (nx > 0.55) botRight++
+                }
+            }
+        }
+
+        // 1. Roundabout: central circular hole surrounded by a closed ring on all 4 sides
+        val holeCx = minX + bw * 0.5
+        val holeCy = minY + bh * 0.5
+        var rayLeft = false
+        var rayRight = false
+        var rayUp = false
+        var rayDown = false
+        val hcy = holeCy.toInt().coerceIn(minY, maxY)
+        val hcx = holeCx.toInt().coerceIn(minX, maxX)
+        for (x in minX until hcx - 1) if (isForeground(x, hcy)) rayLeft = true
+        for (x in hcx + 2..maxX) if (isForeground(x, hcy)) rayRight = true
+        for (y in minY until hcy - 1) if (isForeground(hcx, y)) rayUp = true
+        for (y in hcy + 2..maxY) if (isForeground(hcx, y)) rayDown = true
+
+        val holeRatio = if (holeCount > 0) holeActive.toDouble() / holeCount else 1.0
+        val ringRatio = if (ringCount > 0) ringActive.toDouble() / ringCount else 0.0
+        if (rayLeft && rayRight && rayUp && rayDown && holeCount >= 4 && holeRatio <= 0.15 && ringRatio >= 0.30) {
+            return "roundabout"
+        }
+
+        // 2. U-turn: top arch plus two distinct vertical legs in the bottom half
+        if (topCount > 4 && botLeft >= 4 && botRight >= 4) {
+            val legBalance = kotlin.math.min(botLeft, botRight).toDouble() / kotlin.math.max(botLeft, botRight)
+            if (legBalance >= 0.35 && holeRatio <= 0.25) {
+                return "uturn"
+            }
+        }
+
+        val topMeanX = if (topCount > 0) topSumX / topCount else 0.5
+        val botMeanX = if (botCount > 0) botSumX / botCount else 0.5
+        val shiftX = topMeanX - botMeanX
+        val sideBias = (topRight - topLeft).toDouble() / total.toDouble()
+
+        // 3. Right turn: top head leans right relative to bottom stem
+        if (shiftX >= 0.10 || sideBias >= 0.12) {
+            return "turn_right"
+        }
+
+        // 4. Left turn: top head leans left relative to bottom stem
+        if (shiftX <= -0.10 || sideBias <= -0.12) {
+            return "turn_left"
+        }
+
+        // 5. Symmetrical vertical arrow -> straight
+        if (kotlin.math.abs(topMeanX - 0.5) <= 0.12 && kotlin.math.abs(botMeanX - 0.5) <= 0.12) {
+            return "straight"
+        }
+
+        return "none"
     }
 }
