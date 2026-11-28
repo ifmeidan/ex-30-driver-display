@@ -24,6 +24,8 @@ data class NavState(
 data class VersionedNavState(
     val seq: Long = 0L,
     val state: NavState = NavState(),
+    // Only a live, permitted refresh that observes the end of guidance sets this.
+    val arrivalBeforeRemoval: NavState? = null,
 )
 
 object NavStateRepository {
@@ -87,7 +89,12 @@ object NavStateRepository {
         } else {
             val v = if (_state.value != state) {
                 mutationSeq += 1L
-                VersionedNavState(mutationSeq, state).also {
+                // Maps can withdraw its arrival notification in the same scheduler
+                // turn as posting it. A StateFlow collector may see only this clear.
+                val arrival = _state.value.takeIf {
+                    !state.active && it.maneuver == "destination" && it.arrival != "none"
+                }
+                VersionedNavState(mutationSeq, state, arrival).also {
                     _versioned.value = it
                     _state.value = state
                 }
@@ -139,15 +146,24 @@ class NavFramePublisher(
 ) {
     private val lock = Any()
     private var lastStagedSeq: Long = -1L
-    private var lastDeliveredState: NavState? = null
+    private var lastStagedState: NavState? = null
     private var pendingLine: String? = null
+    private var arrivalLine: String? = null
 
     fun stageChange(versioned: VersionedNavState, optedIn: Boolean): Boolean = synchronized(lock) {
         if (versioned.seq < lastStagedSeq) return false
         val effective = if (optedIn) versioned.state else NavState()
+        if (optedIn && versioned.seq > lastStagedSeq) {
+            val arrival = versioned.arrivalBeforeRemoval
+            arrivalLine = if (arrival != null && (lastStagedState != arrival || pendingLine != null)) {
+                buildFrameJson(arrival, nowMs())
+            } else null
+        } else if (!optedIn) {
+            arrivalLine = null
+        }
         lastStagedSeq = versioned.seq
-        if (effective == lastDeliveredState && pendingLine == null) return false
-        lastDeliveredState = effective
+        if (effective == lastStagedState && pendingLine == null && arrivalLine == null) return false
+        lastStagedState = effective
         pendingLine = buildFrameJson(effective, nowMs())
         true
     }
@@ -160,8 +176,9 @@ class NavFramePublisher(
         if (!optedIn || !versioned.state.active) return false
         // Discard if a newer mutation occurred after the renewal read the state.
         if (versioned.seq < lastStagedSeq || versioned.seq != latestRepoSeq) return false
+        arrivalLine = null
         lastStagedSeq = versioned.seq
-        lastDeliveredState = versioned.state
+        lastStagedState = versioned.state
         pendingLine = buildFrameJson(versioned.state, nowMs())
         true
     }
@@ -171,33 +188,41 @@ class NavFramePublisher(
         latestRepoSeq: Long = NavStateRepository.currentSeq(),
         optedIn: Boolean,
     ): Boolean = synchronized(lock) {
-        pendingLine = null
-        lastDeliveredState = null
-        if (!optedIn) return false
-        if (versioned.seq != latestRepoSeq) return false
-        lastStagedSeq = maxOf(lastStagedSeq, versioned.seq)
-        lastDeliveredState = versioned.state
+        if (!optedIn) {
+            clearPending()
+            return false
+        }
+        if (versioned.seq != latestRepoSeq || versioned.seq < lastStagedSeq) return false
+        arrivalLine = null
+        lastStagedSeq = versioned.seq
+        lastStagedState = versioned.state
         pendingLine = buildFrameJson(versioned.state, nowMs())
         true
     }
 
     fun stageOptOutClear(clearVersion: VersionedNavState): Boolean = synchronized(lock) {
+        arrivalLine = null
         lastStagedSeq = maxOf(lastStagedSeq, clearVersion.seq)
         val empty = NavState()
-        lastDeliveredState = empty
+        lastStagedState = empty
         pendingLine = buildFrameJson(empty, nowMs())
         true
     }
 
     fun pollLine(): String? = synchronized(lock) {
+        arrivalLine?.let {
+            arrivalLine = null
+            return it
+        }
         val line = pendingLine
         pendingLine = null
         line
     }
 
     fun clearPending() = synchronized(lock) {
+        arrivalLine = null
         pendingLine = null
-        lastDeliveredState = null
+        lastStagedState = null
     }
 
     companion object {
@@ -395,10 +420,10 @@ object NavNotificationParser {
     private val SHARP_LEFT_REGEX = Regex("""$WB(?:keskin\s+sol[a]?|tam\s+sol[a]?|sharp\s+left)$WE""")
     private val SHARP_RIGHT_REGEX = Regex("""$WB(?:keskin\s+sağ[a]?|tam\s+sağ[a]?|sharp\s+right)$WE""")
     private val SLIGHT_LEFT_REGEX = Regex(
-        """$WB(?:hafif\s+sol[a]?|sola\s+doğru|soldan\s+devam|sol\s+şeritten|solda\s+kal[ıi]?n?|keep\s+left|bear\s+left|slight\s+left|stay\s+left)$WE""",
+        """$WB(?:hafif(?:çe)?\s+sol[a]?|sola\s+(?:doğru|yönel(?:in|iniz|me)?)|soldan\s+devam|sol\s+şeritten|solda\s+kal[ıi]?n?|keep\s+left|bear\s+left|slight(?:ly)?\s+left|stay\s+left)$WE""",
     )
     private val SLIGHT_RIGHT_REGEX = Regex(
-        """$WB(?:hafif\s+sağ[a]?|sağa\s+doğru|sağdan\s+devam|sağ\s+şeritten|sağda\s+kal[ıi]?n?|keep\s+right|bear\s+right|slight\s+right|stay\s+right)$WE""",
+        """$WB(?:hafif(?:çe)?\s+sağ[a]?|sağa\s+(?:doğru|yönel(?:in|iniz|me)?)|sağdan\s+devam|sağ\s+şeritten|sağda\s+kal[ıi]?n?|keep\s+right|bear\s+right|slight(?:ly)?\s+right|stay\s+right)$WE""",
     )
     private val EXIT_CUE_REGEX = Regex("""$WB(?:ç[ıi]k[ıi][şs](?:tan)?|ayr[ıi]l[ıi]?n?|exit|ramp|off-ramp)$WE""")
     private val LEFT_WORD_REGEX = Regex("""$WB(?:sola|sol|soldan|left)$WE""")
@@ -420,27 +445,45 @@ object NavNotificationParser {
     private val ARRIVAL_VERB_REGEX = Regex(
         """$WB(?:you\s+have\s+arrived|arrived|arrive\s+at|arriving\s+at|ulaşt[ıi]n[ıi]z|geldiniz|vard[ıi]n[ıi]z)$WE""",
     )
-    private val ON_RIGHT_SIDE_REGEX = Regex("""$WB(?:on\s+the\s+right|is\s+on\s+the\s+right|sağda|sağ\s+tarafta)$WE""")
-    private val ON_LEFT_SIDE_REGEX = Regex("""$WB(?:on\s+the\s+left|is\s+on\s+the\s+left|solda|sol\s+tarafta)$WE""")
+    private val ON_RIGHT_SIDE_REGEX = Regex("""$WB(?:on\s+(?:the|your)\s+right|sağda|sağinizda|sağ\s+tarafta)$WE""")
+    private val ON_LEFT_SIDE_REGEX = Regex("""$WB(?:on\s+(?:the|your)\s+left|solda|solunuzda|sol\s+tarafta)$WE""")
     // Note: "left" is excluded here so "Your destination is on the left in 300 m"
     // is never mistaken for an away-summary; "<distance> left" is already caught
     // by ROUTE_SUMMARY_REGEX.
     private val AWAY_SUMMARY_REGEX = Regex("""$WB(?:away|uzakta|kald[ıi]|remaining)$WE""")
+
+    private val MANEUVER_ICON = Regex(
+        """(?:ic_|notification_|nav_|navigation_|directions_|maneuver_)*""" +
+            """((?:turn_)?(?:sharp|slight|keep|bear)_(?:right|left)|turn_(?:right|left)|""" +
+            """(?:arrive|arrival|destination)_(?:right|left)|arrive|arrival|arrived|maneuver_destination)""" +
+            """(?:_(?:black|white|\d{1,3}(?:dp|px)?))*""",
+    )
+
+    /** Decodes semantic resource names only when the notification had no readable maneuver. */
+    fun withManeuverIcon(state: NavState, resourceName: String): NavState? {
+        if (state.maneuver != "none") return state
+        val cue = MANEUVER_ICON.matchEntire(resourceName)?.groupValues?.get(1) ?: return null
+        val arrival = when (cue) {
+            "arrive_left", "arrival_left", "destination_left" -> "destination_left"
+            "arrive_right", "arrival_right", "destination_right" -> "destination_right"
+            "arrive", "arrived", "arrival", "maneuver_destination" -> "destination"
+            else -> "none"
+        }
+        val maneuver = if (arrival != "none") "destination" else classifyTurnClause(cue.replace('_', ' ')).first
+        return state.copy(active = true, maneuver = maneuver, arrival = arrival)
+    }
 
     fun parse(
         title: String?,
         text: String?,
         bigText: String? = null,
         iconHint: String? = null,
+        subText: String? = null,
     ): NavState {
         val titleClauses = extractClauses(title)
         val textClauses = extractClauses(text)
         val bigClauses = extractClauses(bigText)
         val hintClauses = extractClauses(iconHint)
-
-        if (titleClauses.isEmpty() && textClauses.isEmpty() && bigClauses.isEmpty() && hintClauses.isEmpty()) {
-            return NavState()
-        }
 
         // Preserve distinct field roles: primary fields (title, text, iconHint)
         // are evaluated ahead of expanded bigText metadata so a same-length
@@ -454,7 +497,11 @@ object NavNotificationParser {
             for (c in bigClauses) {
                 if (c !in this) add(c)
             }
+            // Subtext often gives the total route distance. It can supply a
+            // written instruction, but never a standalone step distance.
+            addAll(extractClauses(subText))
         }
+        if (orderedClauses.isEmpty()) return NavState()
 
         var turnManeuver = "none"
         var exitNumber = 0
@@ -651,7 +698,7 @@ object NavNotificationParser {
     }
 
     private fun cleanSpace(raw: String?): String =
-        raw?.replace(Regex("""\s+"""), " ")?.trim().orEmpty()
+        raw?.replace(Regex("""[\s\p{Zs}]+"""), " ")?.trim().orEmpty()
 
     private fun normalizeForMatch(raw: String): String =
         raw.lowercase(TR_LOCALE).replace('ı', 'i')

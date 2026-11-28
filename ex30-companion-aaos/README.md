@@ -26,8 +26,8 @@ see the [AAOS and Raspberry Pi runner version notes](../CHANGELOG.md).
   [`docs/properties.md`](docs/properties.md).
 - Streams them as line-delimited JSON over TCP to the Pi at `:7878` —
   wire protocol in [`pi_bridge/protocol.md`](pi_bridge/protocol.md).
-- Requests the saved Pi WiFi network when the head unit starts or wakes
-  and sends bridge traffic over it while cellular provides internet access.
+- Waits ten seconds after the head unit starts or wakes, then uses the saved
+  Pi Wi-Fi when Android joins it. Startup and retries run in the background.
 - Goes quiet when you leave the car (ignition/screen-off detection) so
   it never drains the 12 V battery or holds the vehicle network awake;
   stays up while charging so the Pi can render the charging screen.

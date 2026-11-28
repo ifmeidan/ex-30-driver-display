@@ -187,14 +187,24 @@ only returns after a power cycle.
    name (`ex30-pi` or your custom SSID). For the Pi setup in step 4, select
    **WPA2 password required** and enter your passphrase. Leave that option
    unchecked for an open access point.
-2. Tap **Save and connect**. If WiFi is off, choose **Open Wi-Fi settings**
-   to switch it on, then return to Companion. Approve the network in the
-   Android connection dialog. The app saves the settings on the head unit
-   and requests that network again when the bridge starts or wakes.
-   Android can reuse your approval on later connections. If a previously
-   connected receiver is still starting, the bridge retries up to three
-   times during that wake cycle. The access point needs no internet
-   connection. Android manages internet access for other apps.
+2. Tap **Save and connect**. For a named network, enable device Location
+   (including **Infotainment apps** if listed) and grant Companion **Precise**
+   location with **Allow all the time**. Android uses this permission to reveal
+   the joined SSID while the activity is closed. If the car is already on the
+   Pi network, the bridge can connect immediately.
+
+   In car Wi-Fi settings, make sure the Pi network is saved with **Auto-connect**
+   enabled. If upgrading from 1.0.7, **Connect** uses the existing app profile.
+   If the network is missing from the car's saved networks, tap **Wi-Fi → Add
+   to car Wi-Fi**. Some AAOS versions show a blank **Add network** form where
+   you enter the SSID, security type and password. Choose **Stay connected**
+   if the car asks about the Pi's internet-free network.
+
+   On each start or wake the bridge waits ten seconds, then connects to the
+   Pi when Android selects that SSID. A late receiver can come online after
+   the delay. Retries run in the background. If Wi-Fi is off, turn it on in
+   car settings. Android decides when a saved network is eligible for auto-connect.
+
 3. **Grant the car permissions** when prompted (a one-time consolidated
    prompt): vehicle **speed** and **energy** are "dangerous"-tier on
    AAOS and need explicit approval; the rest are granted at install.
@@ -231,8 +241,8 @@ versions showing only a host field use this method.
 | Symptom | Check |
 |---|---|
 | `VEHICLE DATA` never connects | `sudo systemctl status rfcomm-bind`; re-pair with `bluetoothctl` (PIN `1234`); car must be awake |
-| `CABIN LINK` never connects | Check receiver power, WiFi, the exact SSID and WPA2 passphrase, and the Pi host address. If you dismissed the network request or Android could not connect, tap **Connect** to retry. |
-| Host-only setup loses WiFi after a restart | Enable auto-connect for the receiver's network in car WiFi settings, or enter its SSID and passphrase in Companion so the app can request it. |
+| `CABIN LINK` never connects | Check receiver power, the configured host, and the connected SSID in car Wi-Fi settings. For a named profile, also check device Location and Companion's precise, all-the-time location permission. |
+| The car joins a different network | Open the saved Pi network in car Wi-Fi settings and check **Auto-connect**. Select the Pi network manually if the head unit continues to prefer another saved network. |
 | Display blank | `journalctl -u driver-display -f`; HDMI ribbon seated? `display_auto_detect=0` present in `/boot/firmware/config.txt`? cage needs seatd — `systemctl status seatd` |
 | Clock wrong on the display | `./scripts/install_clock_sync.sh` run? Timezone set? It corrects within seconds of the first AAOS frame |
 | Speed shows `–` | The AAOS bridge is stale (15 s without frames) — speed is AAOS-only by design (see the README source table). Check the AAOS dot bottom-left, the head unit's WiFi, and the app's battery-optimization setting |

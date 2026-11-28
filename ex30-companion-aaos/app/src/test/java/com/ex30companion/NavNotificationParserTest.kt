@@ -298,6 +298,47 @@ class NavNotificationParserTest {
     }
 
     @Test
+    fun `three right turns a bear left and arrival produce canonical wire cues`() {
+        val iconOnly = NavNotificationParser.parse(title = "150\u202fm", text = "Örnek Caddesi")
+        val steps = listOf(
+            NavNotificationParser.parse(title = "300 m", text = "Örnek Caddesi", bigText = "Sağa dönün"),
+            NavNotificationParser.withManeuverIcon(iconOnly, "ic_notification_turn_right_24")!!,
+            NavNotificationParser.parse(title = "80 m", text = "Örnek Caddesi", iconHint = "Turn right"),
+            NavNotificationParser.parse(title = "45 m", text = "Örnek Caddesi", subText = "Sola yönelin"),
+            NavNotificationParser.parse(title = "Varış noktanız sağınızda", text = null),
+        )
+        val publisher = NavFramePublisher(nowMs = { 1000L })
+        val expected = listOf(
+            NavState(true, "turn_right", "300 m"),
+            NavState(true, "turn_right", "150 m"),
+            NavState(true, "turn_right", "80 m"),
+            NavState(true, "slight_left", "45 m"),
+            NavState(true, "destination", arrival = "destination_right"),
+        )
+        for ((actual, wanted) in steps.zip(expected)) {
+            assertTrue(publisher.stageChange(NavStateRepository.update(actual), optedIn = true))
+            assertEquals(NavFramePublisher.buildFrameJson(wanted, 1000L), publisher.pollLine())
+        }
+    }
+
+    @Test
+    fun `unknown icons or disappearance do not imply a turn or arrival`() {
+        val distanceOnly = NavNotificationParser.parse("100 m", "Örnek Caddesi", subText = "2 km")
+        assertEquals(NavState(true, distance = "100 m"), distanceOnly)
+        for (icon in listOf(
+            "ic_chevron_left", "ic_estimated_arrival_time", "time_of_arrival",
+            "ic_turn_right_then_left", "ic_turn_right_then_turn_left", "ic_notification_arrival_time_24dp",
+        )) {
+            assertNull(icon, NavNotificationParser.withManeuverIcon(distanceOnly, icon))
+        }
+        assertEquals(NavState(), NavNotificationParser.parse(title = null, text = null, subText = "2 km"))
+        val arrived = NavNotificationParser.withManeuverIcon(NavState(), "ic_notification_arrive")!!
+        assertEquals(NavState(true, "destination", arrival = "destination"), arrived)
+        assertEquals(arrived, NavNotificationParser.withManeuverIcon(arrived, "ic_notification_turn_left"))
+        assertEquals(NavState(), NavNotificationSelector.selectActive(emptyList()).second)
+    }
+
+    @Test
     fun `word traps, generic Turkish junctions, and highway exits are handled accurately`() {
         // "Brighton Road" contains substring "right" — must NOT match turn_right
         val brighton = NavNotificationParser.parse(title = "350 m", text = "Brighton Road")

@@ -14,6 +14,14 @@
         android:name="android.software.car.templates_host"
         android:required="true" />
 
+    <!-- Resolve named maneuver drawables on the opted-in Maps notification. -->
+    <queries>
+        <package android:name="com.google.android.apps.maps" />
+    </queries>
+
+    <!-- Host-only setups work without location hardware. -->
+    <uses-feature android:name="android.hardware.location" android:required="false" />
+
     <!-- Vehicle property reads — Normal tier (auto-granted at install). -->
     <uses-permission android:name="android.car.permission.CAR_POWERTRAIN" />
     <uses-permission android:name="android.car.permission.CAR_EXTERIOR_ENVIRONMENT" />
@@ -29,6 +37,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Android redacts the SSID of a Wi-Fi link without precise location.
+         Named Pi profiles need this check even when the head unit boots with no activity. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <!-- v0.1.3: requestNetwork() needs CHANGE_NETWORK_STATE (normal,
          install-time grant). Used by BridgeClient to actively hold the
          no-internet ex30-pi WiFi Network so AAOS actually routes bridge

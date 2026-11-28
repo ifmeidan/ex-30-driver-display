@@ -1,6 +1,6 @@
 # Privacy Policy — EX30 Companion
 
-**Last updated**: 26 November 2026
+**Last updated**: 28 November 2026
 
 EX30 Companion ("the app") is a free, open-source companion app for the
 Raspberry Pi EX30 driver display project. This policy describes what data the
@@ -31,7 +31,7 @@ and includes:
 
 The app **does not** access:
 
-- Location, GPS coordinates, street names, destination names, or addresses
+- GPS coordinates or location history
 - Microphone, camera, contacts, calendar, SMS, call log
 - Any account / identity / advertising identifier
 - The Vehicle Identification Number (VIN) or any other identifier that could
@@ -44,7 +44,8 @@ explicitly enables the in-app `Nav` toggle and grants Android Notification
 Access to the app in system settings:
 
 - The app transiently inspects ongoing navigation guidance notifications from
-  Google Maps (`com.google.android.apps.maps`) in memory.
+  Google Maps (`com.google.android.apps.maps`) in memory. It also checks a final
+  update to the tracked notification for an explicit arrival.
 - Only four sanitized fields are extracted and forwarded to the local receiver:
   the canonical next-maneuver direction token (`turn_left`, `turn_right`,
   `roundabout`, etc.), the next-maneuver distance (e.g. `"300 m"`), the
@@ -70,8 +71,9 @@ software.
 - No data is sent to any server operated by the app developer or any third
   party. The source code contains no analytics SDK, no ad SDK, no crash
   reporter, and no telemetry of any kind.
-- The app stores no logs of vehicle data on the device. Any logging happens
-  on the user's own Raspberry Pi, under the user's control.
+- The app stores no logs of vehicle data on the device. A developer can
+  explicitly enable the `Ex30Nav` debug log tag to see the four sanitized
+  navigation fields in Android's diagnostic log.
 
 ## What the app does **not** do
 
@@ -100,24 +102,27 @@ purpose stated:
 | `android.car.permission.CAR_SPEED` | Read vehicle speed. |
 | `android.car.permission.CAR_INFO` | Read battery pack capacity (used to compute SoC %). |
 | `android.permission.INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE` | Check whether WiFi is enabled and open the bridge socket on WiFi to the user's local receiver. |
-| `android.permission.CHANGE_NETWORK_STATE` | Ask Android to connect to the user-specified access point and keep its local network available for the bridge. |
+| `android.permission.CHANGE_NETWORK_STATE` | Keep a Wi-Fi network available for the bridge. |
+| `ACCESS_COARSE_LOCATION`, `ACCESS_FINE_LOCATION`, `ACCESS_BACKGROUND_LOCATION` *(optional, named Wi-Fi profiles)* | Android gates the connected network name behind precise location access. Companion compares that name with the configured Pi network, including while the activity is closed. It does not request geographic coordinates. |
 | `android.permission.FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `POST_NOTIFICATIONS` | Keep the bridge running while the app is in the background; show an ongoing notification so the user can see and stop it. |
 | `android.permission.RECEIVE_BOOT_COMPLETED` | Restart the bridge automatically when the head unit boots, so the display works without opening the app each trip. |
-| `android.permission.BIND_NOTIFICATION_LISTENER_SERVICE` *(optional, user-granted in Settings)* | Used only when the user enables the `Nav` opt-in toggle, to read ongoing Google Maps guidance notifications in memory and extract the next-maneuver direction, next-maneuver distance, and arrival-side cue. |
+| `android.permission.BIND_NOTIFICATION_LISTENER_SERVICE` *(optional, user-granted in Settings)* | Used only when the user enables the `Nav` opt-in toggle, to read Google Maps guidance and its final arrival update in memory. |
 
 ## Data retention and deletion
 
 The app stores the Pi host address, optional WiFi network name (SSID) and
 navigation opt-in on the head unit. For a WPA2 access point, it also stores the
 passphrase encrypted with a key held in Android Keystore. Android uses the name
-and passphrase to join the selected network. The app remembers whether this
-profile connected successfully so it can retry when the receiver starts late.
-WiFi credentials stay out of bridge messages. To remove the saved WiFi credentials, clear the WiFi name and save
-the connection settings. Clearing the app's storage or uninstalling it removes
-all of these settings.
+and passphrase to save the selected network when the driver approves during
+setup. Wi-Fi credentials stay out of bridge messages. Clearing the Wi-Fi name
+and saving removes the app's copy. Clearing app storage or uninstalling the
+app removes its local settings. To remove the system's saved network, choose
+**Forget** in the head unit's Wi-Fi settings.
 
-Vehicle telemetry and transient navigation cues are never retained on the
-device. They are forwarded to the user-supplied local address and discarded.
+The app keeps vehicle telemetry and navigation cues in memory for forwarding
+to the user-supplied local address. If a developer explicitly enables the
+`Ex30Nav` debug tag, sanitized cues and notification field availability can
+also appear in the local Android diagnostic log.
 
 ## Children
 

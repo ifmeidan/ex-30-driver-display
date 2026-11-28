@@ -3,13 +3,21 @@ package com.ex30companion
 import android.app.Notification
 import android.content.ComponentName
 import android.content.Context
+import android.content.pm.PackageManager
+import android.content.res.Resources
+import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Icon
 import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.TextView
+import androidx.car.app.notification.CarAppExtender
 import androidx.core.app.NotificationManagerCompat
 import java.util.Locale
 
@@ -28,6 +36,7 @@ import java.util.Locale
 class NavNotificationListenerService : NotificationListenerService() {
 
     private val serviceLock = Any()
+    private var lastUnknownShape: String? = null
 
     override fun onListenerConnected() {
         super.onListenerConnected()
@@ -60,16 +69,25 @@ class NavNotificationListenerService : NotificationListenerService() {
             // Filter source package and guidance flags BEFORE reading content.
             if (!isEligibleGoogleMapsGuidance(sbn)) {
                 if (sbn.key == NavNotificationSelector.currentTrackedKey()) {
+                    // Maps can replace the very same guidance notification with a
+                    // dismissible arrival. It is a final post, never a renewable cue.
+                    if (isMapsNavigationPost(sbn.packageName, sbn.notification.flags, sbn.notification.category)) {
+                        val finalCue = parseNotification(sbn.notification, diagnose = true)
+                        if (finalCue.maneuver == "destination" && finalCue.arrival != "none") {
+                            publishCue(finalCue)
+                            return
+                        }
+                    }
                     refreshFromActiveLocked()
                 }
                 return
             }
 
-            val parsed = parseNotification(sbn.notification)
+            val parsed = parseNotification(sbn.notification, diagnose = true)
             val activeKeys = currentEligibleKeysOrNull()
             if (parsed.active) {
                 if (NavNotificationSelector.shouldAcceptPost(sbn.key, parsed, activeKeys)) {
-                    NavStateRepository.update(parsed)
+                    publishCue(parsed)
                 }
             } else if (sbn.key == NavNotificationSelector.currentTrackedKey()) {
                 refreshFromActiveLocked()
@@ -142,79 +160,163 @@ class NavNotificationListenerService : NotificationListenerService() {
     private fun isOptedInAndPermitted(): Boolean =
         BridgeSettings.navEnabled(this) && isPermissionGranted(this)
 
-    private fun parseNotification(notification: Notification): NavState {
-        val extras = notification.extras ?: Bundle.EMPTY
-        var title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
-            ?: extras.getCharSequence(Notification.EXTRA_TITLE_BIG)?.toString()
-        val textLines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
-            ?.joinToString("\n") { it.toString() }
-        var text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
-            ?: textLines
-        var bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
-        val ticker = notification.tickerText?.toString()
+    private fun publishCue(cue: NavState) {
+        if (NavStateRepository.state.value != cue && Log.isLoggable(TAG, Log.DEBUG)) {
+            Log.d(TAG, "maneuver=${cue.maneuver} distance=${cue.distance} arrival=${cue.arrival} exit=${cue.exitNumber}")
+        }
+        NavStateRepository.update(cue)
+    }
 
+    private fun parseNotification(notification: Notification, diagnose: Boolean = false): NavState {
+        val extras = notification.extras ?: Bundle.EMPTY
+        val car = if (CarAppExtender.isExtended(notification)) CarAppExtender(notification) else null
         val rvData = extractRemoteViewsData(notification)
         val rvStrings = rvData.texts.filterNot {
             it.lowercase(Locale("tr", "TR")).trim() in ACTION_LABELS
         }
-        if (rvStrings.isNotEmpty()) {
-            if (title.isNullOrBlank()) title = rvStrings[0]
-            if (text.isNullOrBlank() && rvStrings.size >= 2) text = rvStrings[1]
-            if (bigText.isNullOrBlank() && rvStrings.size >= 3) bigText = rvStrings.joinToString("\n")
-        }
-        if (title.isNullOrBlank() && text.isNullOrBlank() && !ticker.isNullOrBlank()) {
-            text = ticker
-        }
 
-        return NavNotificationParser.parse(
-            title = title,
-            text = text,
-            bigText = bigText ?: ticker,
-            iconHint = rvData.descriptions.joinToString("\n"),
+        val cue = NavNotificationParser.parse(
+            title = listOfNotNull(
+                car?.contentTitle,
+                extras.getCharSequence(Notification.EXTRA_TITLE),
+                extras.getCharSequence(Notification.EXTRA_TITLE_BIG),
+            ).joinToString("\n"),
+            text = listOfNotNull(
+                car?.contentText,
+                extras.getCharSequence(Notification.EXTRA_TEXT),
+            ).joinToString("\n"),
+            bigText = buildList {
+                extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.let { add(it) }
+                extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)?.let { addAll(it) }
+                addAll(rvStrings)
+                notification.tickerText?.let { add(it) }
+            }.joinToString("\n"),
+            iconHint = buildList {
+                addAll(rvData.descriptions)
+                extras.getCharSequence(Notification.EXTRA_PICTURE_CONTENT_DESCRIPTION)?.let { add(it.toString()) }
+            }.joinToString("\n"),
+            subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString(),
         )
+        val parsed = if (cue.maneuver == "none") withManeuverIcon(cue, notification, car, rvData.bitmaps) else cue
+        if (diagnose && Log.isLoggable(TAG, Log.DEBUG)) {
+            if (parsed.maneuver == "none") {
+                val shape = "distanceOnly=${parsed.active} carText=${car?.contentTitle != null || car?.contentText != null}" +
+                    " primaryText=${extras.containsKey(Notification.EXTRA_TITLE) || extras.containsKey(Notification.EXTRA_TEXT)}" +
+                    " expandedText=${extras.containsKey(Notification.EXTRA_BIG_TEXT) || extras.containsKey(Notification.EXTRA_TEXT_LINES)}" +
+                    " remoteText=${rvStrings.isNotEmpty()} iconDescription=${rvData.descriptions.isNotEmpty() || extras.containsKey(Notification.EXTRA_PICTURE_CONTENT_DESCRIPTION)}" +
+                    " largeIconType=${notification.getLargeIcon()?.type} smallIconType=${notification.smallIcon?.type}" +
+                    " carBitmap=${car?.largeIcon != null} remoteManeuverBitmap=${rvData.bitmaps.isNotEmpty()}"
+                if (shape != lastUnknownShape) Log.d(TAG, "Unrecognized Maps guidance $shape")
+                lastUnknownShape = shape
+            } else {
+                lastUnknownShape = null
+            }
+        }
+        return parsed
     }
 
-    private data class RemoteViewsData(
-        val texts: List<String>,
-        val descriptions: List<String>,
-    )
+    // A named drawable can carry the maneuver when the accessible text only
+    // contains a street name. Read drawable-backed and bitmap-backed icons only.
+    private fun withManeuverIcon(
+        cue: NavState, notification: Notification, car: CarAppExtender?, remoteBitmaps: Set<Bitmap>,
+    ): NavState {
+        val largeIcon = notification.getLargeIcon()
+        val resIds = listOfNotNull(
+            car?.smallIcon,
+            mapsResourceId(largeIcon),
+            mapsResourceId(notification.smallIcon),
+        ).filter { it != 0 }.distinct()
+        val bitmaps = buildSet {
+            car?.largeIcon?.let { add(it) }
+            bitmapIcon(largeIcon)?.let { add(it) }
+            addAll(remoteBitmaps)
+            if (largeIcon == null && car?.largeIcon == null) bitmapIcon(notification.smallIcon)?.let { add(it) }
+        }
+        if (resIds.isEmpty() && bitmaps.isEmpty()) return cue
+        val resources = try {
+            packageManager.getResourcesForApplication(NavNotificationSelector.GOOGLE_MAPS_PACKAGE)
+        } catch (_: PackageManager.NameNotFoundException) {
+            return cue
+        }
+        for (resId in resIds) {
+            val name = try {
+                resources.getResourceEntryName(resId)
+            } catch (_: Resources.NotFoundException) {
+                continue
+            }
+            NavNotificationParser.withManeuverIcon(cue, name)?.let { return it }
+        }
+        val pkg = NavNotificationSelector.GOOGLE_MAPS_PACKAGE
+        var matched: NavState? = null
+        for (bitmap in bitmaps) {
+            val candidate = NavManeuverBitmap.match(cue, bitmap) { name ->
+                val id = resources.getIdentifier(name, "drawable", pkg)
+                if (id == 0) null else try {
+                    (resources.getDrawable(id, null) as? BitmapDrawable)?.bitmap
+                } catch (_: Resources.NotFoundException) {
+                    null
+                }
+            } ?: continue
+            if (matched != null && matched != candidate) return cue
+            matched = candidate
+        }
+        return matched ?: cue
+    }
+
+    private fun bitmapIcon(icon: Icon?): Bitmap? =
+        if (icon?.type == Icon.TYPE_BITMAP) (icon.loadDrawable(this) as? BitmapDrawable)?.bitmap else null
+
+    private fun mapsResourceId(icon: Icon?): Int? =
+        icon?.takeIf { it.type == Icon.TYPE_RESOURCE && it.resPackage == NavNotificationSelector.GOOGLE_MAPS_PACKAGE }?.resId
+
+    private class RemoteViewsData {
+        val texts = linkedSetOf<String>()
+        val descriptions = linkedSetOf<String>()
+        val bitmaps = linkedSetOf<Bitmap>()
+    }
 
     @Suppress("DEPRECATION")
     private fun extractRemoteViewsData(n: Notification): RemoteViewsData {
         val candidates = listOfNotNull(n.bigContentView, n.contentView, n.headsUpContentView)
-        if (candidates.isEmpty()) return RemoteViewsData(emptyList(), emptyList())
-        val texts = LinkedHashSet<String>()
-        val descs = LinkedHashSet<String>()
+        val data = RemoteViewsData()
+        if (candidates.isEmpty()) return data
         val parent = FrameLayout(applicationContext)
         for (rv in candidates) {
             try {
                 val inflated = rv.apply(applicationContext, parent)
-                collectViews(inflated, texts, descs)
+                val iconId = inflated.resources.getIdentifier(
+                    "nav_notification_icon", "id", NavNotificationSelector.GOOGLE_MAPS_PACKAGE,
+                )
+                collectViews(inflated, data, iconId)
             } catch (_: Throwable) {
             }
         }
-        return RemoteViewsData(texts.toList(), descs.toList())
+        return data
     }
 
-    private fun collectViews(v: View?, texts: MutableSet<String>, descs: MutableSet<String>) {
-        if (v == null || v.visibility == View.GONE) return
+    private fun collectViews(v: View?, data: RemoteViewsData, maneuverIconId: Int) {
+        if (v == null || v.visibility != View.VISIBLE) return
+        if (maneuverIconId != 0 && v.id == maneuverIconId && v is ImageView) {
+            (v.drawable as? BitmapDrawable)?.bitmap?.let { data.bitmaps.add(it) }
+        }
         v.contentDescription?.toString()?.replace(Regex("""[^\S\r\n]+"""), " ")?.trim()?.let { desc ->
             if (desc.isNotEmpty() && desc.lowercase(Locale("tr", "TR")) !in ACTION_LABELS) {
-                descs.add(desc)
+                data.descriptions.add(desc)
             }
         }
         if (v is TextView) {
             val s = v.text?.toString()?.replace(Regex("""[^\S\r\n]+"""), " ")?.trim().orEmpty()
-            if (s.isNotEmpty()) texts.add(s)
+            if (s.isNotEmpty()) data.texts.add(s)
         }
         if (v is ViewGroup) {
             for (i in 0 until v.childCount) {
-                collectViews(v.getChildAt(i), texts, descs)
+                collectViews(v.getChildAt(i), data, maneuverIconId)
             }
         }
     }
 
     companion object {
+        private const val TAG = "Ex30Nav"
         private val ACTION_LABELS = setOf(
             "çık", "çıkış", "exit", "iptal", "cancel", "durdur", "stop",
             "kapat", "dismiss", "sesi kapat", "mute", "sesi aç", "unmute",
@@ -233,12 +335,14 @@ class NavNotificationListenerService : NotificationListenerService() {
             category: String?,
             isOngoing: Boolean,
         ): Boolean {
-            if (packageName != NavNotificationSelector.GOOGLE_MAPS_PACKAGE) return false
-            if ((flags and Notification.FLAG_GROUP_SUMMARY) != 0) return false
             val ongoingFlag = isOngoing || (flags and Notification.FLAG_ONGOING_EVENT) != 0
-            if (!ongoingFlag) return false
-            return category == Notification.CATEGORY_NAVIGATION
+            return ongoingFlag && isMapsNavigationPost(packageName, flags, category)
         }
+
+        private fun isMapsNavigationPost(packageName: String?, flags: Int, category: String?): Boolean =
+            packageName == NavNotificationSelector.GOOGLE_MAPS_PACKAGE &&
+                (flags and Notification.FLAG_GROUP_SUMMARY) == 0 &&
+                category == Notification.CATEGORY_NAVIGATION
 
         fun isEligibleGoogleMapsGuidance(sbn: StatusBarNotification): Boolean {
             val n = sbn.notification ?: return false

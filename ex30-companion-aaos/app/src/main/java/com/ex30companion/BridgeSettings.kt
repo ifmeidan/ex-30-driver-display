@@ -17,7 +17,6 @@ object BridgeSettings {
     private const val KEY_HOST = "pi_host"
     private const val KEY_SSID = "pi_ssid"
     private const val KEY_PASSPHRASE = "pi_wpa2_encrypted"
-    private const val KEY_WIFI_CONNECTED = "pi_wifi_connected"
     private const val KEY_NAV_ENABLED = "nav_enabled"
     private const val KEY_ALIAS = "ex30_bridge_wifi"
     private const val KEY_STORE = "AndroidKeyStore"
@@ -44,16 +43,6 @@ object BridgeSettings {
 
     fun hasPassphrase(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).contains(KEY_PASSPHRASE)
-
-    fun previouslyConnected(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_WIFI_CONNECTED, false)
-
-    fun recordConnection(context: Context, networkName: String) {
-        if (networkName == ssid(context) && !previouslyConnected(context)) {
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                .putBoolean(KEY_WIFI_CONNECTED, true).apply()
-        }
-    }
 
     fun wifi(context: Context): Wifi? {
         val saved = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).all
@@ -86,7 +75,6 @@ object BridgeSettings {
             .putString(KEY_HOST, host.trim())
             .putString(KEY_SSID, ssid.ifEmpty { null })
             .putString(KEY_PASSPHRASE, encrypted)
-            .remove(KEY_WIFI_CONNECTED)
             .apply()
     }
 
